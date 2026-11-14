@@ -156,7 +156,7 @@ try:
             completed_moves.append(
                 {
                     "Step": logged_move_count + 1,
-                    "Disk": disk_index + 1,
+                    "Disk": f"D{disk_index + 1}",
                     "Move": f"{peg_names[source]}->{peg_names[destination]}",
                 }
             )
