@@ -198,7 +198,6 @@ git add .
 git commit -m "first commit"
 git branch -M main
 git remote add origin https://github.com/nekoluga748/Tower-of-Hanoi.git
-git push -u origin main
 
 # 建立整合分支；各功能分支由 dev 分出
 git switch -c dev
