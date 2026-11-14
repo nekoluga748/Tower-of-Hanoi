@@ -189,47 +189,6 @@ hanoi_tower/
 
 ---
 
-## 📤 GitHub 分支工作流程
-
-```bash
-# 初始化並推送目前專案
-git init
-git add .
-git commit -m "first commit"
-git branch -M main
-git remote add origin https://github.com/nekoluga748/Tower-of-Hanoi.git
-git push -u origin main
-
-# 建立整合分支；各功能分支由 dev 分出
-git switch -c dev
-git push -u origin dev
-git switch -c feature/planner dev
-# 在此分支修改並提交 Hanoi 規劃器
-git switch dev
-git merge --no-ff feature/planner
-git switch -c feature/franka-control
-# 在此分支修改並提交 Franka 與取放控制
-git switch dev
-git merge --no-ff feature/franka-control
-git switch -c feature/tower-scene
-# 在此分支修改並提交場景與堆疊管理
-git switch dev
-git merge --no-ff feature/tower-scene
-git switch -c feature/app-entry
-# 在此分支修改並提交應用程式入口
-
-# 功能分支完成後合併回 dev，再發布到 main
-git switch dev
-git merge --no-ff feature/app-entry
-git push origin dev
-git switch main
-git merge --no-ff dev
-git push origin main
-```
-
-> `.gitignore` 會排除 `.venv/` 與 `recordings/*.mp4` 等大型或本機產生的檔案。
-> `examples/original_franka/` 是未修改上游範例的存放位置；目前工作區未附上該原始
-> 範例，因此該資料夾只保留來源與授權說明。
 ---
 
 ## ❓ 常見問題 Q&A
