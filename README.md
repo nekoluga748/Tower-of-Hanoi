@@ -68,45 +68,41 @@ Hanoi 遞迴演算法、盤子尺寸規則、三柱符號狀態、重試／校�
 
 > 將 N-1 個盤子從來源柱移至輔助柱 → 將最大盤移至目標柱 → 再將 N-1 個盤子從輔助柱移至目標柱。
 
-此策略可保證**最優步數為 $2^N - 1$**（N 為盤子數量）。本專案 `planner.py` 以純 Python 生成完整動作序列，支援 2～10 層（3 步至 1,023 步），並以內部堆疊（`_stacks`）維持符號層狀態，與 Isaac Sim 物理模擬層雙向同步。
+令 $T(N)$ 為三柱、$N$ 個盤子的最少移動數。任意合法解都必須先把上方 $N-1$ 個盤子移到暫存柱，才能移動最大盤，再把這 $N-1$ 個盤子移到目標柱，因此
+
+$$T(0)=0,\qquad T(N)=2T(N-1)+1.$$
+
+由遞迴展開可得 $T(N)=2^N-1$。上述演算法達到此下界，故為最優解。本專案 `planner.py` 以純 Python 生成移動序列，並由 `tower.py` 的 `_stacks` 維持離散堆疊狀態；該狀態只在物理取放確認完成後更新，以便對照規劃狀態與模擬狀態。
 
 ---
 
 ### b. S 曲線平滑軌跡（三次 Hermite Smoothstep）
 
-手臂各階段位置命令採用三次 Hermite 平滑插值函數：
+手臂各階段的位置命令採用三次 Hermite smoothstep。令 $t\in[0,1]$ 為正規化時間，並令 $s(t)=at^3+bt^2+ct+d$。施加 $s(0)=0$、$s(1)=1$ 及兩端斜率為零的四個邊界條件，可得：
 
-$$s(t) = 3t^2 - 2t^3, \quad t \in [0, 1]$$
+$$s(t)=3t^2-2t^3,\qquad s(0)=0,\quad s(1)=1,\quad s'(0)=s'(1)=0.$$
 
-**物理意義：**
-- $s(0) = 0$，$s(1) = 1$：端點準確抵達目標
-- $s'(0) = 0$，$s'(1) = 0$：兩端速度為零，啟動與停止無衝擊
-- 三次多項式的端點二階導數不為零，因此只主張端點速度為零，不宣稱端點加速度連續
+若位置軌跡定義為 $\mathbf{p}(t)=\mathbf{p}_0+s(t)(\mathbf{p}_1-\mathbf{p}_0)$，則 $s(0)=0$、$s(1)=1$ 分別保證 $\mathbf{p}(0)=\mathbf{p}_0$ 與 $\mathbf{p}(1)=\mathbf{p}_1$；$s'(0)=s'(1)=0$ 使軌跡端點的參數速度為零。這些條件不代表實際關節速度、接觸力或碰撞安全已獲保證。此三次多項式的端點二階導數不為零，因此不能據此宣稱加速度連續。
 
-相較於線性插值，smoothstep 讓笛卡兒位置命令以零端點速度進出；實際關節力矩和接觸結果仍由 Isaac Sim 物理控制器決定。抓取底部另有到位收斂等待，並非全程無停頓。
+相較於線性插值，smoothstep 讓笛卡兒位置命令以零端點速度進出；實際關節響應和接觸結果仍由 Isaac Sim 物理控制器決定。抓取底部另有到位收斂等待，並非全程連續運動。
 
 ---
 
 ### c. 差分逆運動學（dIK）
 
-每一模擬影格，控制器讀取末端目前世界位姿 $\mathbf{x}$、目前關節角 $\mathbf{q}$ 及
-Isaac Sim Articulation 提供的末端 Jacobian $\mathbf{J}$。FSM 產生該影格的目標位姿
-$\mathbf{x}_d$；程式計算局部誤差並解出關節增量 $\Delta\mathbf{q}$，再以
-$\mathbf{q}_{cmd}=\mathbf{q}+\Delta\mathbf{q}$ 下達關節位置目標。下一影格重新讀取物理狀態，
-所以這是閉迴路的逐影格差分 IK，不是一次產生整段關節軌跡。
+每一模擬影格，控制器讀取目前關節角 $\mathbf{q}$、末端位置 $\mathbf{p}$ 與單位四元數方向 $q$，並取得末端 Jacobian $\mathbf{J}(\mathbf{q})$。局部微分運動學以 $\Delta\mathbf{x}\approx\mathbf{J}(\mathbf{q})\Delta\mathbf{q}$ 描述小幅關節變化與末端任務空間變化的近似關係。令目標位姿記為 $\mathbf{x}_{d}=(\mathbf{p}_{d},q_{d})$；下標 $d$ 表示 desired（目標），不是乘法或額外變數。位置誤差為 $\mathbf{e}_{p}=\mathbf{p}_{d}-\mathbf{p}$。方向誤差由相對四元數 $q_{e}=q_{d}\otimes q^{-1}=(w_{e},\mathbf{v}_{e})$ 的向量部分建立，並選擇 $w_e\geq0$ 的等價表示以取較短旋轉路徑；這是小角度下與旋轉誤差成比例的局部表示，不是兩個四元數直接相減。位置模式使用 $\mathbf{e}_{p}$，姿態模式則串接 $\mathbf{e}=[\mathbf{e}_{p}^{\mathsf{T}},\mathbf{v}_{e}^{\mathsf{T}}]^{\mathsf{T}}$。控制器解出關節增量 $\Delta\mathbf{q}$，再令 $\mathbf{q}_{cmd}=\mathbf{q}+\Delta\mathbf{q}$。下一影格重新讀取物理狀態並重算增量，因此這是閉迴路、逐影格的差分 IK，而非一次產生完整關節軌跡。
 
-概念式可寫為：
+以下為以 Moore–Penrose 偽逆表示的冗餘機械臂概念式：
 
-$$\Delta\mathbf{q} = \mathbf{J}^{+}\mathbf{e} + (\mathbf{I}-\mathbf{J}^{+}\mathbf{J})\mathbf{z}$$
+$$\Delta\mathbf{q}=\mathbf{J}^{+}\mathbf{e}+(\mathbf{I}-\mathbf{J}^{+}\mathbf{J})\mathbf{z}.$$
 
-其中 $\mathbf{e}$ 是位置誤差，或合併位置與方向誤差的 6 維向量；$\mathbf{z}$ 是回到
-預設手肘姿態的零空間偏好。程式預設使用自適應 DLS，也可由 `--ik-method` 選擇其他方法。
+其中 $\mathbf{e}$ 是前述局部任務空間誤差，位置模式為 3 維，姿態模式為 6 維。$\mathbf{J}^{+}\mathbf{e}$ 是主要任務的關節增量；$\mathbf{z}$ 表示次要關節姿態偏好，而 $\mathbf{I}-\mathbf{J}^{+}\mathbf{J}$ 將其投影至 Jacobian 的零空間，使次要目標在理想模型下不改變主要任務的一階末端速度。程式的主要任務預設使用自適應 DLS；零空間投影則使用精確 Moore–Penrose 偽逆，故上式是概念分解，不表示兩項都使用同一個阻尼偽逆。實際方法可由 `--ik-method` 選擇。
 
 | 項目 | 說明 |
 |------|------|
-| **雅可比矩陣** $\mathbf{J}$ | 關節空間到任務空間的線性映射，描述各關節對末端速度的貢獻 |
-| **阻尼最小平方（DLS）** | 以奇異值 $\sigma$ 的 $\sigma/(\sigma^2+\lambda^2)$ 作阻尼逆；最小奇異值降低時增大 $\lambda$，限制增量放大，但不取代關節限位或碰撞檢查 |
-| **零空間投影** | $(\mathbf{I} - \mathbf{J}^{+}\mathbf{J})\mathbf{z}$：使用 7 軸冗餘度偏向預設關節姿態；實作使用精確偽逆建立投影矩陣 |
+| **雅可比矩陣** $\mathbf{J}$ | 在目前構型附近將關節速度映射至末端線速度／角速度；此為局部線性化，不描述有限幅度運動的完整非線性關係 |
+| **阻尼最小平方（DLS）** | 對 $\mathbf{J}=\mathbf{U}\mathbf{\Sigma}\mathbf{V}^{\mathsf{T}}$，以 $\sigma_i/(\sigma_i^2+\lambda^2)$ 取代 $1/\sigma_i$，降低小奇異值附近的增量放大；阻尼不等同關節限位或碰撞檢查 |
+| **零空間投影** | $\mathbf{N}=\mathbf{I}-\mathbf{J}^{+}\mathbf{J}$；將次要姿態偏好投影至零空間。實作以精確偽逆構造 $\mathbf{N}$，並非使用 DLS 近似投影 |
 
 `franka.py` 中的關節讀取、Jacobian、`set_dof_position_targets()`、`Articulation` 和
 `RigidPrim` 來自 NVIDIA Isaac Sim；dIK 分支、阻尼調整及任務空間目標換算為本專案實作。

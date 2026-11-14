@@ -143,7 +143,8 @@ class Franka(Articulation):
                 pseudoinverse = np.linalg.pinv(jacobian_end_effector)
                 delta_q = (scale * pseudoinverse @ error).squeeze(-1)
 
-            # 零空間自姿態收斂
+            # 以精確 Moore-Penrose 偽逆建立零空間投影；在此局部模型下，
+            # J(I - J+J) = 0，因此次要姿態修正不改變主要位置任務的一階輸出。
             if current_dof_positions is not None and default_dof_positions is not None:
                 num_dofs = jacobian_end_effector.shape[-1]
                 eye = np.eye(num_dofs, dtype=np.float32)
@@ -192,16 +193,17 @@ class Franka(Articulation):
             pseudoinverse = np.swapaxes(jacobian_end_effector, 1, 2)
             delta_q = (scale * pseudoinverse @ error).squeeze(-1)
         elif method == "damped-least-squares":
-            # 奇異值自適應阻尼最小平方法 (推薦最佳演算法)
+            # 奇異值自適應阻尼最小平方法：抑制近奇異方向的小奇異值增益。
             delta_q, pseudoinverse = self._adaptive_damped_least_squares(
                 jacobian_end_effector, error, scale, method_cfg
             )
         else:
             raise ValueError(f"無效的 IK 方法：{method}")
 
-        # 零空間 (Null-Space) 姿態優化：
-        # 利用 7 軸機械臂的多餘自由度 (Redundancy)，將手肘拉向預設舒適構型
-        # 嚴格使用 exact pseudoinverse 確保投影在笛卡爾空間的影響為 0 (J * (I - pinv(J)*J) == 0)
+        # 零空間次要目標：以精確 Moore-Penrose 偽逆構造 N = I - J+J，
+        # 並將預設姿態差投影為 N(q_default - q)。對當前 Jacobian，J N = 0，
+        # 因而此項不改變主要 6 維任務的一階速度；這是局部運動學性質，
+        # 不保證有限步長下的非線性位姿完全不變。
         if current_dof_positions is not None and default_dof_positions is not None:
             num_dofs = jacobian_end_effector.shape[-1]
             eye = np.eye(num_dofs, dtype=np.float32)
@@ -239,11 +241,12 @@ class Franka(Articulation):
         max_damping = method_cfg.get("max_damping", 0.25)
         singularity_threshold = method_cfg.get("singularity_threshold", 0.15)
 
-        # 執行 SVD 分解
+        # J = U diag(sigma) V^T；奇異值描述各正交運動方向上的局部增益。
         left_vectors, singular_values, right_vectors = np.linalg.svd(jacobian, full_matrices=False)
         smallest_singular_value = singular_values[:, -1]
 
-        # 奇異度比例計算
+        # 最小奇異值高於門檻時使用 base_damping；低於門檻時線性提高阻尼，
+        # 並在 max_damping 飽和，避免倒數增益在近奇異構型中無界放大。
         singularity_ratio = np.clip(
             (singularity_threshold - smallest_singular_value) / singularity_threshold,
             0.0,

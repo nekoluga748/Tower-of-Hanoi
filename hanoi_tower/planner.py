@@ -114,26 +114,26 @@ def plan_hanoi(disk_count: int) -> list[Move]:
     moves: list[Move] = []
 
     def move_stack(count: int, source: int, destination: int, spare: int) -> None:
-        # 遞迴不變條件：把 source 柱最上方 count 個盤子，依合法大小順序搬到 destination；
-        # spare 是唯一可暫放的柱子。呼叫返回時，這 count 個盤子已全部在 destination。
+        # 契約：移動 source 頂端 count 個盤子至 destination；spare 提供唯一暫存柱。
+        # 前提是來源子堆疊合法，且 destination 上的盤子都大於此子堆疊中的盤子。
+        # 後置條件是這 count 個盤子依原順序位於 destination，且每一步均保持合法。
         if count == 0:
-            # 沒有盤子需要搬，是遞迴終止條件；不產生任何移動。
+            # 基底情形：空集合已滿足移動目標，故不需產生任何操作。
             return
 
-        # 步驟一：先搬走壓在最大盤上方的 count-1 個小盤。
-        # 此子問題的目的地改成 spare，而原 destination 暫時充當新的 spare。
+        # 歸納步驟一：依歸納假設，先將 count-1 個較小盤合法移至 spare，
+        # 使目前最大盤 count-1 暴露於 source 頂端。
         move_stack(count - 1, source, spare, destination)
 
-        # 步驟二：此時 source 頂端已是這組盤子中最大的盤（索引 count-1），
-        # destination 為空或頂盤比它大，所以可以合法地直接移動。
+        # 較大盤可放在空柱或更大盤之上，因此此移動合法。
         moves.append((count - 1, source, destination))
 
-        # 步驟三：把剛才暫放在 spare 的 count-1 個小盤搬到最大盤上。
-        # 這次 destination 是原目標柱，source 則成為可暫放小盤的 spare。
+        # 歸納步驟二：再次依歸納假設，將 spare 上的 count-1 個盤子移至
+        # destination；遞迴契約遂對 count 個盤子成立。
         move_stack(count - 1, spare, destination, source)
 
-    # 由小子問題組合大問題：每層需完成兩個 count-1 子問題，再移動一次最大盤，
-    # 因此 T(n)=2T(n-1)+1、T(0)=0，總步數為 2**n-1，亦為三柱 Hanoi 的最少步數。
-    # 初始任務是由 Peg 0 搬到 Peg 2，Peg 1 作為暫存柱。
+    # 每個非基底問題由兩個 count-1 子問題及一次最大盤移動組成，故
+    # T(0)=0、T(n)=2T(n-1)+1，解為 2**n-1；該構造達到此問題的下界。
+    # 初始化柱位：0 為來源、2 為目標、1 為暫存。
     move_stack(disk_count, 0, 2, 1)
     return moves
