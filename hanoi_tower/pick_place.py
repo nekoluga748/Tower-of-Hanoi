@@ -20,12 +20,12 @@
 ================================================================================
 
 本檔保留 NVIDIA Copyright 與 Apache-2.0 授權標頭，提供由 Franka 抓取／放置範例
-延伸的單物件操作骨架。本專案將它整理成可重複呼叫的 FSM；`tower.py` 再將每一筆
+延伸的單物件操作骨架。本專案將它整理成可重複呼叫的 FSM；tower.py 再將每一筆
 Hanoi 移動映射成一次完整的五階段取放。NVIDIA Isaac Sim 負責場景、物理與 Articulation
 API；此檔負責本專案的階段時序與目標位姿插值。
 
 連續末端運動被分割為離散 Phase，每個模擬影格只產生當前階段的一個目標，之後透過
-`Franka.set_end_effector_pose()` 依實際關節／末端狀態重新計算關節目標。
+Franka.set_end_effector_pose() 依實際關節／末端狀態重新計算關節目標。
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │          一次 Hanoi 搬盤動作（1 Hanoi Step）= Phase 0 ~ 4 合計              │
@@ -60,11 +60,11 @@ class FrankaPickPlace:
     """Franka 模組化取放任務控制器（5 階段 FSM）。
 
     一個完整任務依序執行：巡航至來源上方、抓取並抬升、水平搬運、下降放置、
-    張爪並退避。此類別只管理目前 `cube` 與 `target_position`；多盤來源選擇、
-    三柱堆疊和合法移動由子類別 `FrankaTowerOfHanoi` 負責。
+    張爪並退避。此類別只管理目前 cube 與 target_position；多盤來源選擇、
+    三柱堆疊和合法移動由子類別 FrankaTowerOfHanoi 負責。
 
     Args:
-        events_dt: 五個 Phase 的最大模擬影格數；`None` 使用內建設定。
+        events_dt: 五個 Phase 的最大模擬影格數；None 使用內建設定。
         robot_name: 用於錯誤訊息的機器人名稱。
     """
 
@@ -121,7 +121,12 @@ class FrankaPickPlace:
     def _smoothstep(self, step: int, total_steps: int) -> float:
         """三次 Hermite 平滑插值比例 s(t) = 3t²－2t³，t ∈ [0, 1]。
 
-        起始速度 s'(0)=0、終止速度 s'(1)=0，確保運動平滑無衝擊。
+        推導：令三次式 s(t)=at³+bt²+ct+d，以 s(0)=0、s'(0)=0、
+        s(1)=1、s'(1)=0 作為端點位置與斜率條件，可得 d=c=0、
+        a+b=1、3a+2b=0，解出 a=-2、b=3。因此 s'(0)=s'(1)=0。
+        對直線位置命令 p(t)=p0+s(t)(p1-p0)，有
+        p'(t)=s'(t)(p1-p0)，所以命令軌跡兩端的參數速度為零；這不等於保證
+        物理手臂的實際速度、加速度或接觸力也連續。
         """
         t = min(max(step / max(total_steps, 1), 0.0), 1.0)
         return t * t * (3.0 - 2.0 * t)
@@ -139,14 +144,14 @@ class FrankaPickPlace:
     ) -> None:
         """以 S 曲線產生本影格的末端位置命令，再交由 Franka dIK 轉成關節目標。
 
-        `p_start` 是進入該 Phase 時讀取的末端實際世界位置；`p_target` 是任務層提供
-        的世界座標位置。每影格命令為 `p_start + (p_target - p_start) * s(t)`。
-        `orientation` 使用 `[w, x, y, z]` 四元數。這裡只建立單影格笛卡兒目標，
-        關節增量由 `Franka.set_end_effector_pose()` 使用當前 Jacobian 計算。
+        p_start 是進入該 Phase 時讀取的末端實際世界位置；p_target 是任務層提供
+        的世界座標位置。每影格命令為 p_start + (p_target - p_start) * s(t)。
+        orientation 使用 [w, x, y, z] 四元數。這裡只建立單影格笛卡兒目標，
+        關節增量由 Franka.set_end_effector_pose() 使用當前 Jacobian 計算。
 
         參數：
-            target_position: 本階段末端目標世界位置，形狀可轉為 `(3,)`。
-            orientation: 末端目標四元數 `[w, x, y, z]`。
+            target_position: 本階段末端目標世界位置，形狀可轉為 (3,)。
+            orientation: 末端目標四元數 [w, x, y, z]。
             ik_method: 傳給 Franka dIK 的求解器名稱。
             locked_dof_indices: 不參與本次 dIK 的手臂關節索引。
             position_only: 為 True 時只使用 Jacobian 的平移列。
@@ -177,7 +182,7 @@ class FrankaPickPlace:
     def _advance_phase(self, target_position: np.ndarray, tolerance: float = 0.025) -> None:
         """以實際末端位置和模擬影格數判斷是否切換 Phase。
 
-        Phase 0–2 在走過額定時間 70% 且位置誤差小於 `tolerance` 時可提早結束；
+        Phase 0–2 在走過額定時間 70% 且位置誤差小於 tolerance 時可提早結束；
         Phase 3、4 必須至少走完額定影格並分別達 10 mm、15 mm 誤差門檻。任何 Phase
         超過額定時間 40 影格仍未收斂時會強制前進，避免控制器永久卡住；這是
         deadlock 保護，不代表目標已達成，因此上層仍需執行抓取和放置檢查。
@@ -227,13 +232,13 @@ class FrankaPickPlace:
     ) -> None:
         """在目前 USD Stage 建立 Franka、基礎方塊及必要環境。
 
-        本專案透過 NVIDIA Isaac Sim `Cube`、`GeomPrim`、`GroundPlane`、`DomeLight`
+        本專案透過 NVIDIA Isaac Sim Cube、GeomPrim、GroundPlane、DomeLight
         等 API 建立與包裝場景物件。所有位置、偏移和尺寸均以世界座標／公尺表達；
         子類別可傳入自己的來源方塊位置、尺寸與 Prim 路徑。
 
         Args:
             cube_initial_position: 方塊初始世界位置；未提供時使用預設值。
-            cube_initial_orientation: 初始四元數 `[w, x, y, z]`。
+            cube_initial_orientation: 初始四元數 [w, x, y, z]。
             cube_size: 方塊 XYZ 尺寸（公尺）。
             target_position: 預設末端目標世界位置（公尺）。
             offset: 同時套用到方塊、目標及機器人根節點的世界平移。
@@ -297,7 +302,7 @@ class FrankaPickPlace:
         """依目前 FSM 階段執行一影格取放控制。
 
         呼叫端負責推進 Isaac Sim 模擬影格。本方法只下達關節目標並更新 FSM 計數，
-        不自行呼叫 `SimulationApp.update()`。呼叫方可藉 `is_done()` 判斷五個 Phase
+        不自行呼叫 SimulationApp.update()。呼叫方可藉 is_done() 判斷五個 Phase
         是否已完成；Hanoi 子類別會在此基礎上插入盤子抬升與放置校驗。
 
         Args:

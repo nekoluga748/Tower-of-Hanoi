@@ -1,12 +1,12 @@
 """把 Hanoi 符號規劃接到 Isaac Sim 剛體場景的任務控制器。
 
-NVIDIA Franka Pick-and-Place 示範的單次抓放控制單位由 `FrankaPickPlace` 提供；
+NVIDIA Franka Pick-and-Place 示範的單次抓放控制單位由 FrankaPickPlace 提供；
 本模組在其上加入盤子集合、三柱符號堆疊、遞迴移動序列及每步完成／失敗判定。
 每筆移動開始時，符號規劃選出來源盤與目的柱；控制器再從 USD Stage 的剛體世界位姿
 取得實際放置高度，將「物件目標」換算成「末端目標」。只有一次完整取放通過後，
-才更新 `_stacks` 和 `_move_index`，使離散任務狀態不會先於物理操作提交。
+才更新 _stacks 和 _move_index，使離散任務狀態不會先於物理操作提交。
 
-NVIDIA 依賴集中在 Isaac Sim 實驗性 `Cube`、`RigidPrim`、`GeomPrim`、材質及 Stage API；
+NVIDIA 依賴集中在 Isaac Sim 實驗性 Cube、RigidPrim、GeomPrim、材質及 Stage API；
 Hanoi 遞迴、盤位狀態同步與抓取／放置檢查是本專案邏輯。
 """
 
@@ -23,11 +23,11 @@ from .pick_place import FrankaPickPlace
 
 
 class FrankaTowerOfHanoi(FrankaPickPlace):
-    """在三柱剛體場景中逐步執行 `plan_hanoi()` 的 Franka Hanoi 控制器。
+    """在三柱剛體場景中逐步執行 plan_hanoi() 的 Franka Hanoi 控制器。
 
-    一筆 Hanoi 移動包含 `FrankaPickPlace` 的五個 Phase。`_moves` 是預先計算的
-    符號解；`_stacks` 由底至頂保存各柱盤子索引，索引 0 對應最小盤。每次啟動移動時，
-    本類別將來源盤設為基礎控制器目前的 `cube`，計算目的盤中心，再交由基礎 FSM
+    一筆 Hanoi 移動包含 FrankaPickPlace 的五個 Phase。_moves 是預先計算的
+    符號解；_stacks 由底至頂保存各柱盤子索引，索引 0 對應最小盤。每次啟動移動時，
+    本類別將來源盤設為基礎控制器目前的 cube，計算目的盤中心，再交由基礎 FSM
     下達手臂動作。抓取以盤子實際位移確認；放置以盤子世界位置校正，並允許最多兩次
     重降。只有基礎 FSM 完成且檢查未使任務失敗，符號堆疊才提交該筆移動。
     """
@@ -36,9 +36,9 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         """建立 Hanoi 任務參數及初始符號堆疊。
 
         參數：
-            disk_count: 盤子數量，支援 2 至 10 盤；移動數為 `2**disk_count - 1`。
+            disk_count: 盤子數量，支援 2 至 10 盤；移動數為 2**disk_count - 1。
 
-        `disk_widths` 由小至大排列，索引 0 是頂層最小盤；`_stacks[0]` 以底盤在前、
+        disk_widths 由小至大排列，索引 0 是頂層最小盤；_stacks[0] 以底盤在前、
         頂盤在後保存初始順序。實際幾何單位為公尺，物理姿態由 Isaac Sim 回報。
         """
         if not 2 <= disk_count <= 10:
@@ -104,15 +104,15 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._failed = False
 
     def _disk_size(self, disk_index: int) -> np.ndarray:
-        """回傳盤子的 `(X 寬度, Y 寬度, Z 厚度)` 尺寸，單位為公尺。"""
+        """回傳盤子的 (X 寬度, Y 寬度, Z 厚度) 尺寸，單位為公尺。"""
         width = self.disk_widths[disk_index]
         return np.array([width, width, self.disk_thickness])
 
     def _disk_position(self, disk_index: int, peg_index: int, level: int) -> np.ndarray:
         """依柱位與堆疊層數計算盤子幾何中心的世界座標。
 
-        `level=0` 表示盤子直接放在地面；更高層中心每次增加一個盤厚。
-        此函式計算理想初始／目標位置；執行中的實際位置仍由 `RigidPrim` 回報。
+        level=0 表示盤子直接放在地面；更高層中心每次增加一個盤厚。
+        此函式計算理想初始／目標位置；執行中的實際位置仍由 RigidPrim 回報。
         """
         peg_x, peg_y = self.peg_positions[peg_index]
         center_z = (level + 0.5) * self.disk_thickness
@@ -121,8 +121,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
     def setup_scene(self) -> None:
         """在目前 USD Stage 建立 Franka、盤子剛體、地面、柱框標籤及物理材質。
 
-        透過 NVIDIA Isaac Sim 的 `Cube`、`GeomPrim`、`RigidPrim` 和
-        `RigidBodyMaterial` API 建立或包裝幾何；盤子加入碰撞 API，標記僅作視覺用途。
+        透過 NVIDIA Isaac Sim 的 Cube、GeomPrim、RigidPrim 和
+        RigidBodyMaterial API 建立或包裝幾何；盤子加入碰撞 API，標記僅作視覺用途。
         建立完成後載入第一筆遞迴移動，但尚未播放模擬；應用入口會啟動 Timeline 並 reset。
         """
         bottom_disk = self.disk_count - 1
@@ -227,8 +227,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         """把目前符號移動轉成基礎 Pick-and-Place 控制器的物件與目標位姿。
 
         X/Y 目標固定在目的柱中心，以抑制堆疊誤差累積；若目的柱已有盤子，Z 目標
-        取其最上層剛體的實測中心加一個盤厚。`lift_height` 則由最高符號堆疊與
-        `required_lift_height()` 計算，並再檢查是否至少能到達安全走廊。
+        取其最上層剛體的實測中心加一個盤厚。lift_height 則由最高符號堆疊與
+        required_lift_height() 計算，並再檢查是否至少能到達安全走廊。
         """
         disk_index, source, destination = self._moves[self._move_index]
         source_level = len(self._stacks[source]) - 1
@@ -276,7 +276,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         """未確認盤子被抬起時，重設 FSM 並以較低抓取目標重試。
 
         抬升不足或水平漂移超過閾值時呼叫。重試會重新張爪、清除取物基準並把
-        `approach_height` 降低 25 mm；達到最大嘗試次數則設定 `_failed`，停止後續移動。
+        approach_height 降低 25 mm；達到最大嘗試次數則設定 _failed，停止後續移動。
         回傳值表示是否允許繼續任務。
         """
         self._pickup_attempts += 1
@@ -309,8 +309,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         呼叫端需在模擬正在播放時逐影格呼叫。每影格先處理基於實測剛體位姿的抓取／
         放置檢查，再呼叫基礎 FSM 下達末端目標。基礎 FSM 全部完成後才更新來源和目的
-        `_stacks`，並啟動下一筆移動。回傳值沿用基礎控制器的執行狀態；任務最終狀態
-        請以 `is_done()` 判斷。
+        _stacks，並啟動下一筆移動。回傳值沿用基礎控制器的執行狀態；任務最終狀態
+        請以 is_done() 判斷。
         """
         if self._failed or self._move_index >= len(self._moves):
             return False

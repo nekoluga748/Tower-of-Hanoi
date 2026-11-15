@@ -166,6 +166,12 @@ $$\Delta\mathbf{q}=\mathbf{J}^{+}\mathbf{e}+(\mathbf{I}-\mathbf{J}^{+}\mathbf{J}
 
 # 選擇性以 20 Hz 輸出末端世界位置與四元數方向（預設 false）
 ./run.sh --disks 3 --log-end-effector-pose true
+
+# 降低視窗與 MP4 錄影解析度（預設 960x540；也可選 640x360 或 1280x720）
+./run.sh --disks 3 --resolution 640x360
+
+# 顯示 Isaac Sim 側邊與底部面板（預設隱藏）
+./run.sh --disks 3 --show-panels
 ```
 
 > **支援層數範圍**：`--disks` 參數可接受 2 至 10（對應 3 至 1023 步）。
@@ -174,6 +180,8 @@ $$\Delta\mathbf{q}=\mathbf{J}^{+}\mathbf{e}+(\mathbf{I}-\mathbf{J}^{+}\mathbf{J}
 > 例如影片 `recordings/hanoi_3disks_時間戳.mp4` 對應表格
 > `recordings/hanoi_3disks_時間戳.csv`。預設不輸出末端姿態；使用
 > `--log-end-effector-pose true` 才會開啟 20 Hz 診斷列印。
+> `--resolution` 會同時設定模擬視窗與錄影影格大小；解析度越低，影片檔案通常越小。
+> 預設會在場景建立前隱藏 Stage、Property、Content、Console、Timeline 與 Render Settings 面板，任務結束後保留 1 秒再自動關閉 Isaac Sim；使用 `--show-panels` 可保留面板。
 
 ---
 

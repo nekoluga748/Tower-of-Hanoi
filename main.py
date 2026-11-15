@@ -1,15 +1,22 @@
-"""NVIDIA Isaac Sim 中的 Franka 河內塔應用程式入口。
+"""NVIDIA Isaac Sim 中的 Franka 河內塔應用程式組合根。
 
-虛實整合執行順序：
-1. 在匯入其他 Isaac Sim 模組前建立 `SimulationApp`，再啟用場景所需擴充套件。
-2. 建立 `FrankaTowerOfHanoi`；控制器在 USD Stage 建立機械手臂、剛體盤子及標記。
-3. 啟動 Timeline，逐幀呼叫控制器；控制器讀取剛體與末端世界座標，產生笛卡兒
-    目標，再由差分逆運動學轉成關節位置目標交給 Isaac Sim 物理引擎。
-4. 只有完整取放階段完成後才提交一筆河內塔符號移動，並輸出 pandas 表格及 CSV。
-5. 在 `finally` 釋放影片編碼器並關閉 SimulationApp。
+本檔負責把模擬器生命週期、任務控制器及外部輸出組合起來；Hanoi 規則、抓放策略與
+關節控制分屬不同層，避免任務邏輯直接依賴 USD／PhysX 細節：
 
-NVIDIA 外部資源與 API 在此入口的使用點：`isaacsim.SimulationApp`、`omni.kit.app`
-擴充管理器、Timeline、`SimulationManager`、`set_camera_view`，以及錄影時使用的
+* planner.py 是純 Python 規劃層，只產生 (盤子索引, 來源柱, 目標柱)，不讀寫場景。
+* tower.py 是任務協調層，將符號移動映射成物件與末端目標，並在物理操作確認後提交
+    _stacks；符號狀態代表已完成的任務，不取代剛體的實際位置。
+* pick_place.py 是操作策略層，管理通用單物件抓放控制，不判斷 Hanoi 移動是否合法。
+* franka.py 是機器人控制層，將末端位姿誤差和 Isaac Sim 提供的 Jacobian 轉成關節
+    目標；PhysX／Articulation 負責實際運動，控制命令不等於物理結果。
+* 本檔作為組合根，建立 Isaac Sim 與場景、驅動每幀更新，並處理錄影、結果輸出及關閉。
+
+跨層的核心契約是「目標、命令、實測狀態各自分離」：規劃層提供離散意圖，控制層將意圖
+轉為連續命令，任務協調層依實測剛體狀態驗證完成與否，再更新符號堆疊。這使演算法可
+獨立測試，也避免尚未完成的物理操作被記成已完成的 Hanoi 步驟。
+
+NVIDIA 外部資源與 API 在此入口的使用點：isaacsim.SimulationApp、omni.kit.app
+擴充管理器、Timeline、SimulationManager、set_camera_view，以及錄影時使用的
 Synthetic Data 感測器。河內塔規劃與控制邏輯由本專案實作；pandas 負責結果表格，
 OpenCV 負責 MP4 編碼，兩者都不是 NVIDIA 資源。
 """
@@ -27,9 +34,20 @@ import pandas as pd
 # =============================================================================
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--headless", action="store_true", help="無圖形介面背景執行模式（適合伺服器/自動化測試）")
-parser.add_argument("--test", action="store_true", help="演算法完全解出並結束後自動退出程式")
+parser.add_argument("--test", action="store_true", help="相容舊用法；任務結束後皆會自動退出")
 parser.add_argument("--disks", type=int, choices=range(2, 11), default=3, help="河內塔層數（支援 2 至 10 層，最大 1023 步）")
 parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="物理模擬計算後端 (cpu 或 cuda)")
+parser.add_argument(
+    "--resolution",
+    choices=("640x360", "960x540", "1280x720"),
+    default="960x540",
+    help="視窗與錄影解析度（預設 960x540）",
+)
+parser.add_argument(
+    "--show-panels",
+    action="store_true",
+    help="保留 Isaac Sim 側邊與底部面板顯示（預設隱藏）",
+)
 parser.add_argument("--record", type=Path, help="將視口畫面儲存為 MP4 影片的路徑")
 parser.add_argument("--record-fps", type=int, default=30, help="錄製影片的每秒幀率 (FPS)")
 parser.add_argument(
@@ -58,22 +76,38 @@ if args.record is None:
 if args.record.suffix.lower() != ".mp4":
     parser.error("--record 輸出檔名後綴必須為 .mp4")
 
+render_width, render_height = (int(value) for value in args.resolution.split("x"))
+
 # SimulationApp 必須先於其他 Isaac Sim/Omniverse 匯入建立，讓 Kit 初始化 Python 執行環境。
 from isaacsim import SimulationApp
 
 simulation_app = SimulationApp(
     {
         "headless": args.headless,
-        "width": 1280,
-        "height": 720,
-        "window_width": 1280,
-        "window_height": 720,
+        "width": render_width,
+        "height": render_height,
+        "window_width": render_width,
+        "window_height": render_height,
     }
 )
 video_writer = None
 
 try:
     import omni.kit.app
+    import omni.ui as ui
+
+    def hide_workspace_panels() -> None:
+        for panel_name in (
+            "Stage",
+            "Property",
+            "Content",
+            "Console",
+            "Timeline",
+            "Render Settings",
+        ):
+            panel = ui.Workspace.get_window(panel_name)
+            if panel is not None:
+                panel.visible = False
 
     # NVIDIA Isaac Sim 擴充套件提供本專案使用的實驗性物件、Prim、材質及模擬管理 API。
     extension_manager = omni.kit.app.get_app().get_extension_manager()
@@ -92,6 +126,10 @@ try:
         extension_manager.set_extension_enabled_immediate("omni.syntheticdata", True)
 
     simulation_app.update()
+
+    if not args.show_panels:
+        # 在建立場景前收起停駐面板，讓模擬視口一開始就完整顯示。
+        hide_workspace_panels()
 
     import omni.timeline
     from isaacsim.core.simulation_manager import SimulationManager
@@ -112,6 +150,9 @@ try:
     controller = FrankaTowerOfHanoi(disk_count=args.disks)
     controller.setup_scene()
     simulation_app.update()
+    if not args.show_panels:
+        # 部分渲染面板可能在場景初始化期間建立，再隱藏一次確保不覆蓋視口。
+        hide_workspace_panels()
 
     # 設定最佳觀察相機視角（居中斜俯視角，清楚呈現 3 根柱子與手臂姿態）
     set_camera_view(
@@ -145,6 +186,7 @@ try:
     # 模擬主循環 (Simulation Main Loop)
     # =========================================================================
     completed = False
+    completion_time: float | None = None
     while simulation_app.is_running():
         # 每個模擬影格只送出一次控制更新；物理結果在後續 update 中回饋到剛體狀態。
         if SimulationManager.is_simulating() and not completed:
@@ -164,6 +206,7 @@ try:
 
         if controller.is_done() and not completed:
             completed = True
+            completion_time = time.monotonic()
             moves_table = pd.DataFrame(completed_moves, columns=["Step", "Disk", "Move"])
             print(moves_table.to_string(index=False, justify="center"))
             table_path = args.record.with_suffix(".csv")
@@ -204,8 +247,8 @@ try:
                 frame_bgr = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2BGR)
                 video_writer.write(frame_bgr)
 
-        # 測試模式下，完成任務後自動退出
-        if completed and args.test:
+        # 留一秒讓使用者看到結束狀態，並讓最後的錄影影格寫入後再關閉應用程式。
+        if completed and completion_time is not None and time.monotonic() - completion_time >= 1.0:
             break
 finally:
     # 釋放影片寫入器資源並關閉 SimulationApp
