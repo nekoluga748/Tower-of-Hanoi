@@ -42,9 +42,6 @@ Thumbs.db
 .nvidia-omniverse/
 kit/
 
-# Simulation Recordings (large binary MP4 files)
-recordings/*.mp4
-recordings/*.avi
-recordings/*.mov
-recordings/*.csv
+# Simulation Recordings & Artifacts (ignore all generated files inside recordings/)
+recordings/*
 !recordings/.gitkeep

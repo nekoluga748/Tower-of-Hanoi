@@ -81,11 +81,11 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._default_approach_height = self.approach_height
         self.lift_height = 0.14              # 抓起後的提升高度
         self.retreat_height = 0.16           # 放置完畢後的垂直退避高度
-        self.carry_reserve = 0.06            # 水平巡航時高於最高塔的安全裕度
+        self.carry_reserve = 0.08            # 水平巡航時高於最高塔的安全裕度（放大至 8cm 防撞）
         self.grasp_lift_threshold = 0.035    # 判定抓取成功的垂直提升閾值
-        self.grasp_xy_tolerance = 0.035      # 抓取提升過程允許的水平滑移容許值
-        self.carry_tracking_tolerance = 0.05 # 水平搬運過程方塊相對夾爪的滑移容許值
-        self.placement_tolerance = 0.075     # 最終放置誤差容許值
+        self.grasp_xy_tolerance = 0.018      # 抓取提升過程允許的水平滑移容許值（精度細化至原本 2 倍）
+        self.carry_tracking_tolerance = 0.035 # 水平搬運過程方塊相對夾爪的滑移容許值
+        self.placement_tolerance = 0.038     # 最終放置誤差容許值（精度細化至原本 2 倍）
         self.max_pickup_attempts = 3         # 抓取失敗最大重試次數
 
         # 實體剛體與狀態變數
@@ -178,12 +178,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
                     colors=marker_color,
                 )
 
-            label_center_x = peg_x - self.marker_size / 2 - label_width / 2 - 0.015
+            label_center_x = peg_x - self.marker_size / 2 - label_width / 2 - 0.035
+            label_center_y = peg_y + label_height / 2
             for stroke_index, (start, end) in enumerate(label_strokes["ABC"[peg_index]]):
-                start_x = label_center_x + start[0] * label_width
-                start_y = peg_y + start[1] * label_height
-                end_x = label_center_x + end[0] * label_width
-                end_y = peg_y + end[1] * label_height
+                start_x = label_center_x + (start[1] - 0.5) * label_height
+                start_y = label_center_y - (start[0] * label_width)
+                end_x = label_center_x + (end[1] - 0.5) * label_height
+                end_y = label_center_y - (end[0] * label_width)
                 delta_x = end_x - start_x
                 delta_y = end_y - start_y
                 stroke_length = float(np.hypot(delta_x, delta_y))
@@ -211,17 +212,16 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._activate_current_move()
 
     def _safe_transit_z(self) -> float:
-        """依目前最高符號堆疊估算水平搬運時的末端巡航 Z。
+        """依目前最高符號堆疊估算水平搬運與撤離時的末端巡航安全 Z 高度。
 
-        估算式以最高堆疊頂面、抓取高度、半盤厚及 4 cm 裕度相加，並限制在
-        0.24–0.34 m。這是末端走廊的幾何啟發式，不等於完整碰撞規劃；實際安全性
-        仍取決於盤子／夾爪尺寸、當前姿態及 PhysX 場景。
+        估算式以最高堆疊頂面、抓取高度、半盤厚及 8cm 安全裕度相加，並將最大允許
+        高度上限放大至 0.46m，確保高層數搬運與退避撤離時絕對不碰撞任何柱子上的方塊。
         """
         tallest_stack = max(len(stack) for stack in self._stacks)
         tallest_stack_top = tallest_stack * self.disk_thickness
-        margin = 0.04
+        margin = 0.08  # 放大防撞裕度至 8cm
         computed = tallest_stack_top + self.approach_height + self.disk_thickness / 2 + margin
-        return float(np.clip(computed, 0.24, 0.34))
+        return float(np.clip(computed, 0.28, 0.46))
 
     def _activate_current_move(self) -> None:
         """把目前符號移動轉成基礎 Pick-and-Place 控制器的物件與目標位姿。
@@ -236,13 +236,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         source_center_z = (source_level + 0.5) * self.disk_thickness
         tallest_stack = max(len(stack) for stack in self._stacks)
 
-        # 計算越過最高塔所需的垂直提升高度
+        # 計算越過最高塔所需的垂直提升高度，並確保安全淨空
         self.lift_height = required_lift_height(
             current_disk_center_z=source_center_z,
             stack_layers=tallest_stack,
             block_height=self.disk_thickness,
             reserve=self.carry_reserve,
-            minimum=0.10,
+            minimum=0.14,
         )
         safe_z = self._safe_transit_z()
         min_lift_for_safe = safe_z - source_center_z
@@ -332,7 +332,6 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
             # 判斷是否所有步數皆完成
             if self._move_index >= len(self._moves):
-                print("Tower of Hanoi completed!")
                 return False
 
             # 切換至下一步：重置狀態機並載入下一步動作

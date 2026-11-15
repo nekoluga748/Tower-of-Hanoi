@@ -192,14 +192,20 @@ try:
         if SimulationManager.is_simulating() and not completed:
             controller.forward(args.ik_method)
 
-        # _move_index 只在完整取放 FSM 完成後增加，因此這裡記錄的是已提交的實際任務步驟。
+        # _move_index 只在完整取放 FSM 完成後增加，每動完 1 step 即時輸出至終端機
         while logged_move_count < controller._move_index:
             disk_index, source, destination = controller._moves[logged_move_count]
+            if logged_move_count == 0:
+                print(" Step Disk Move", flush=True)
+            step_num = logged_move_count + 1
+            disk_name = f"D{disk_index + 1}"
+            move_str = f"{peg_names[source]}->{peg_names[destination]}"
+            print(f"{step_num:3d}    {disk_name:<2}  {move_str}", flush=True)
             completed_moves.append(
                 {
-                    "Step": logged_move_count + 1,
-                    "Disk": f"D{disk_index + 1}",
-                    "Move": f"{peg_names[source]}->{peg_names[destination]}",
+                    "Step": step_num,
+                    "Disk": disk_name,
+                    "Move": move_str,
                 }
             )
             logged_move_count += 1
@@ -208,14 +214,13 @@ try:
             completed = True
             completion_time = time.monotonic()
             moves_table = pd.DataFrame(completed_moves, columns=["Step", "Disk", "Move"])
-            print(moves_table.to_string(index=False, justify="center"))
             table_path = args.record.with_suffix(".csv")
             moves_table.to_csv(table_path, index=False, encoding="utf-8-sig")
-            print(f"移動表已保存：{table_path}")
+            print(f"移動表已保存：{table_path}", flush=True)
             if controller._failed:
-                print(f"任務中止，已完成 {len(completed_moves)} 步。")
+                print(f"任務中止，已完成 {len(completed_moves)} 步。", flush=True)
             else:
-                print(f"河內塔完成，共移動 {len(completed_moves)} 步。")
+                print(f"河內塔完成，共移動 {len(completed_moves)} 步。", flush=True)
 
         # 更新物理世界與渲染畫面一幀
         simulation_app.update()
