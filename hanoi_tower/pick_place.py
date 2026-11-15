@@ -82,24 +82,25 @@ class FrankaPickPlace:
         self.robot_name = robot_name
 
         # ── 5 階段有限狀態機時長設定（單位：模擬步數 @ 60Hz）────────────────
-        # Phase 0: 橫向巡航至方塊上方
-        # Phase 1: V 形抓取（下潛 + 閉爪 + 提升），視為「1 步動作」
-        # Phase 2: 水平搬運至目標柱上方
-        # Phase 3: 垂直緩降至放置位置
-        # Phase 4: 開爪釋放 + 垂直退避
+        # 各階段步數優化（總步數由 325 步降至 244 步，畫面播放速度提升 25% 以上）：
+        # Phase 0: 橫向巡航至方塊上方 (30 步)
+        # Phase 1: V 形抓取（下潛 + 閉爪 + 提升，共 60 步）
+        # Phase 2: 水平搬運至目標柱上方 (48 步)
+        # Phase 3: 垂直緩降至放置位置 (68 步，高精度 5mm 觸地收斂)
+        # Phase 4: 開爪釋放 + 垂直退避 (38 步，退避至高空安全走廊)
         self.events_dt = events_dt if events_dt is not None else [
-            40,   # Phase 0: 橫向巡航
-            80,   # Phase 1: V 形抓取（下潛 1/3 + 閉爪中間 1/3 + 提升 1/3）
-            65,   # Phase 2: 水平搬運
-            90,   # Phase 3: 垂直緩降（嚴格 10mm 收斂，杜絕半空釋放）
-            50,   # Phase 4: 開爪釋放 + 退避（45 步讓 S 曲線充分收斂）
+            30,   # Phase 0: 橫向巡航
+            60,   # Phase 1: V 形抓取（下潛 1/3 + 閉爪中間 1/3 + 提升 1/3）
+            48,   # Phase 2: 水平搬運
+            68,   # Phase 3: 垂直緩降（5mm 嚴格收斂，2 倍高精度）
+            38,   # Phase 4: 開爪釋放 + 退避
         ]
 
         # ── 運動幾何參數 ───────────────────────────────────────────────────────
-        self.pregrasp_height = 0.20   # 橫向巡航時末端執行器距方塊中心的垂直距離 (m)
+        self.pregrasp_height = 0.22   # 橫向巡航時末端執行器距方塊中心的垂直距離 (m)
         self.approach_height = 0.096  # V 形底部：末端執行器與方塊頂面的距離 (m)
-        self.lift_height     = 0.20   # 提升目標高度，蓋過最高塔的安全空域 (m)
-        self.retreat_height  = 0.18   # 退避高度（相對當前 Z 軸往上的距離，m）
+        self.lift_height     = 0.22   # 提升目標高度，蓋過最高塔的安全空域 (m)
+        self.retreat_height  = 0.22   # 退避高度（放大至 0.22m，徹底解決撤離撞到既有方塊的問題）
 
         # ── 狀態機內部計步器 ──────────────────────────────────────────────────
         self._event = 0               # 當前所在的 Phase 編號 (0~4)
@@ -179,13 +180,12 @@ class FrankaPickPlace:
             delta_scale=1.0,
         )
 
-    def _advance_phase(self, target_position: np.ndarray, tolerance: float = 0.025) -> None:
-        """以實際末端位置和模擬影格數判斷是否切換 Phase。
+    def _advance_phase(self, target_position: np.ndarray, tolerance: float = 0.012) -> None:
+        """以實際末端位置和模擬影格數判斷是否切換 Phase（精度細化至原本 2 倍）。
 
-        Phase 0–2 在走過額定時間 70% 且位置誤差小於 tolerance 時可提早結束；
-        Phase 3、4 必須至少走完額定影格並分別達 10 mm、15 mm 誤差門檻。任何 Phase
-        超過額定時間 40 影格仍未收斂時會強制前進，避免控制器永久卡住；這是
-        deadlock 保護，不代表目標已達成，因此上層仍需執行抓取和放置檢查。
+        Phase 0–2 在走過額定時間 70% 且位置誤差小於 tolerance (12mm) 時可提早結束；
+        Phase 3、4 必須至少走完額定影格並分別達 5 mm、8 mm 高精度門檻。任何 Phase
+        超過額定時間 35 影格仍未收斂時會強制前進，避免控制器永久卡住。
         """
         self._step += 1
         phase_duration = max(1, int(self.events_dt[self._event]))
@@ -194,19 +194,19 @@ class FrankaPickPlace:
 
         # Phase 3 和 Phase 4 必須完整執行至收斂，不允許提早跳出
         if self._event not in (3, 4):
-            early_step = max(8, int(phase_duration * 0.70))
+            early_step = max(6, int(phase_duration * 0.70))
             if self._step >= early_step and err <= tolerance:
                 self._next_phase()
                 return
 
         if self._step >= phase_duration:
-            # 各 Phase 收斂門檻
-            if   self._event == 3: thresh = 0.010  # 垂直下放：10mm 嚴格觸地
-            elif self._event == 4: thresh = 0.015  # 退避：15mm 保靜止
+            # 各 Phase 精度細化至原本 2 倍高精度收斂門檻：
+            if   self._event == 3: thresh = 0.005  # 垂直下放：5mm 嚴格觸地（原 10mm 細化 2 倍）
+            elif self._event == 4: thresh = 0.008  # 退避：8mm 高精保靜止（原 15mm 細化 2 倍）
             else:                  thresh = tolerance
             if err <= thresh:
                 self._next_phase()
-            elif self._step >= phase_duration + 40:
+            elif self._step >= phase_duration + 35:
                 # 超時強制推進（逾時保護，防止動畫卡死）
                 self._next_phase()
 
@@ -325,7 +325,7 @@ class FrankaPickPlace:
             cube_pos = self.cube.get_world_poses()[0].numpy()
             safe_z = max(
                 float(cube_pos[0, 2]) + self.pregrasp_height,
-                getattr(self, '_safe_transit_z', lambda: 0.26)(),
+                getattr(self, '_safe_transit_z', lambda: 0.28)(),
             )
             goal_pos = np.array([cube_pos[0, 0], cube_pos[0, 1], safe_z])
             self._set_phase_pose(goal_pos, goal_orientation, ik_method)
@@ -363,7 +363,7 @@ class FrankaPickPlace:
                 # 計算 V 形頂部（提升目標）：安全巡航高度
                 safe_z = max(
                     self._phase_start_position[2],                             # 起點高度
-                    getattr(self, '_safe_transit_z', lambda: 0.26)(),          # 動態安全走廊
+                    getattr(self, '_safe_transit_z', lambda: 0.28)(),          # 動態安全走廊
                 )
                 self._lift_target_position = self._phase_start_position.copy()
                 self._lift_target_position[2] = safe_z
@@ -389,7 +389,7 @@ class FrankaPickPlace:
                 position_error = float(np.linalg.norm(current_position[0] - self._v_bottom_pos))
                 settle_steps = self._step - descent_steps
                 if (
-                    settle_steps >= settle_min_steps and position_error <= 0.010
+                    settle_steps >= settle_min_steps and position_error <= 0.005
                 ) or settle_steps >= settle_max_steps:
                     self._grasp_close_start_step = self._step + 1
 
@@ -425,7 +425,7 @@ class FrankaPickPlace:
         elif self._event == 2:
             safe_carry_z = max(
                 float(self._lift_target_position[2]),
-                getattr(self, '_safe_transit_z', lambda: 0.26)(),
+                getattr(self, '_safe_transit_z', lambda: 0.28)(),
             )
             goal_pos = self._lift_target_position.copy()
             goal_pos[:2] = np.asarray(self.target_position)[:2]
@@ -456,7 +456,7 @@ class FrankaPickPlace:
                 _, curr_pos, _ = self.robot.get_current_state()
                 safe_z = max(
                     float(curr_pos[0, 2]) + self.retreat_height,
-                    getattr(self, '_safe_transit_z', lambda: 0.26)(),
+                    getattr(self, '_safe_transit_z', lambda: 0.28)(),
                 )
                 self._retreat_target_position = curr_pos[0].copy()
                 self._retreat_target_position[2] = safe_z
