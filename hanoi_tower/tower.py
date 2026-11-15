@@ -178,12 +178,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
                     colors=marker_color,
                 )
 
-            label_center_x = peg_x - self.marker_size / 2 - label_width / 2 - 0.015
+            label_center_x = peg_x - self.marker_size / 2 - label_width / 2 - 0.035
+            label_center_y = peg_y + label_height / 2
             for stroke_index, (start, end) in enumerate(label_strokes["ABC"[peg_index]]):
-                start_x = label_center_x + start[0] * label_width
-                start_y = peg_y + start[1] * label_height
-                end_x = label_center_x + end[0] * label_width
-                end_y = peg_y + end[1] * label_height
+                start_x = label_center_x + (start[1] - 0.5) * label_height
+                start_y = label_center_y - (start[0] * label_width)
+                end_x = label_center_x + (end[1] - 0.5) * label_height
+                end_y = label_center_y - (end[0] * label_width)
                 delta_x = end_x - start_x
                 delta_y = end_y - start_y
                 stroke_length = float(np.hypot(delta_x, delta_y))

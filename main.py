@@ -24,6 +24,7 @@ OpenCV 負責 MP4 編碼，兩者都不是 NVIDIA 資源。
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import time
@@ -122,6 +123,13 @@ try:
     import omni.kit.app
     import omni.ui as ui
 
+    if args.on_hand_camera:
+        import omni.appwindow
+
+        app_window = omni.appwindow.acquire_app_window_factory_interface().get_app_window()
+        if app_window is not None:
+            app_window.move(0, 40)
+
     def hide_workspace_panels() -> None:
         for panel_name in (
             "Stage",
@@ -189,19 +197,136 @@ try:
     if args.on_hand_camera:
         hand_path = controller.robot.end_effector_link.paths[0]
         camera_path = f"{hand_path}/OnHandCamera"
+        from pxr import Gf
+
+        camera_local_translation = np.array([0.06, 0.0, 0.04])
         hand_camera = RtxCamera(camera_path, tick_rate=30.0)
-        hand_camera.set_local_poses(
-            translations=np.array([0.06, 0.0, 0.04]),
-            orientations=np.array([0.0, 1.0, 0.0, 0.0]),
+        hand_positions, hand_orientations = controller.robot.end_effector_link.get_world_poses()
+        hand_position = hand_positions.numpy()[0]
+        hand_quaternion = hand_orientations.numpy()[0]
+        hand_rotation = Gf.Rotation(
+            Gf.Quatd(
+                float(hand_quaternion[0]),
+                Gf.Vec3d(*(float(value) for value in hand_quaternion[1:])),
+            )
         )
-        hand_camera.camera.set_focal_lengths(12.0)
+        camera_position = hand_position + np.asarray(
+            hand_rotation.GetQuat().Transform(Gf.Vec3d(*camera_local_translation))
+        )
+        gripper_direction_world = hand_position[:2] - camera_position[:2]
+        gripper_direction_length = np.linalg.norm(gripper_direction_world)
+        if gripper_direction_length < 1e-6:
+            gripper_direction_world = np.array([1.0, 0.0])
+        else:
+            gripper_direction_world /= gripper_direction_length
+        camera_tilt_degrees = 20.0
+        camera_tilt_radians = np.deg2rad(camera_tilt_degrees)
+        camera_forward_world = np.array(
+            [
+                gripper_direction_world[0] * np.sin(camera_tilt_radians),
+                gripper_direction_world[1] * np.sin(camera_tilt_radians),
+                -np.cos(camera_tilt_radians),
+            ]
+        )
+        camera_up_world = np.array([1.0, 0.0, 0.0])
+        camera_up_world -= np.dot(camera_up_world, camera_forward_world) * camera_forward_world
+        camera_up_world /= np.linalg.norm(camera_up_world)
+        camera_horizontal_world = np.cross(camera_forward_world, camera_up_world)
+        camera_horizontal_world /= np.linalg.norm(camera_horizontal_world)
+        camera_world_quaternion = (
+            Gf.Matrix4d(1.0)
+            .SetLookAt(
+                Gf.Vec3d(*(float(value) for value in camera_position)),
+                Gf.Vec3d(*(float(value) for value in camera_position + camera_forward_world)),
+                Gf.Vec3d(*(float(value) for value in camera_up_world)),
+            )
+            .GetInverse()
+            .ExtractRotation()
+            .GetQuat()
+        )
+        camera_roll_degrees = 45.0
+        camera_world_quaternion = camera_world_quaternion * Gf.Rotation(
+            Gf.Vec3d(0.0, 0.0, 1.0), camera_roll_degrees
+        ).GetQuat()
+        camera_world_orientation = np.array(
+            [
+                camera_world_quaternion.GetReal(),
+                *camera_world_quaternion.GetImaginary(),
+            ]
+        )
+        camera_horizontal_world = np.asarray(
+            camera_world_quaternion.Transform(Gf.Vec3d(1.0, 0.0, 0.0))
+        )
+        camera_up_world = np.asarray(
+            camera_world_quaternion.Transform(Gf.Vec3d(0.0, 1.0, 0.0))
+        )
+        camera_forward_world = np.asarray(
+            camera_world_quaternion.Transform(Gf.Vec3d(0.0, 0.0, -1.0))
+        )
+        camera_local_quaternion = hand_rotation.GetQuat().GetInverse() * camera_world_quaternion
+        camera_local_imaginary = camera_local_quaternion.GetImaginary()
+        hand_camera.set_local_poses(
+            translations=camera_local_translation,
+            orientations=np.array(
+                [
+                    camera_local_quaternion.GetReal(),
+                    camera_local_imaginary[0],
+                    camera_local_imaginary[1],
+                    camera_local_imaginary[2],
+                ]
+            ),
+        )
+        hand_camera.camera.set_focal_lengths(1.2)
         hand_camera.camera.set_clipping_ranges(0.01, 5.0)
         on_hand_camera_sensor = CameraSensor(
             hand_camera,
             resolution=(360, 640),
-            annotators=["rgb"],
+            annotators=["rgb", "distance_to_image_plane", "instance_segmentation"],
         )
+        focal_length = float(hand_camera.camera.get_focal_lengths().numpy()[0, 0])
+        horizontal_aperture, vertical_aperture = hand_camera.camera.get_apertures()
+        horizontal_aperture = float(horizontal_aperture.numpy()[0, 0])
+        vertical_aperture = float(vertical_aperture.numpy()[0, 0])
+        camera_metadata = {
+            "camera_prim_path": camera_path,
+            "parent_link_path": hand_path,
+            "resolution": {"width": 640, "height": 360},
+            "intrinsics": {
+                "fx_px": 640 * focal_length / horizontal_aperture,
+                "fy_px": 360 * focal_length / vertical_aperture,
+                "cx_px": 320.0,
+                "cy_px": 180.0,
+                "focal_length_mm": focal_length * 10.0,
+                "horizontal_aperture_mm": horizontal_aperture * 10.0,
+                "vertical_aperture_mm": vertical_aperture * 10.0,
+            },
+            "depth": {
+                "annotator": "distance_to_image_plane",
+                "unit": "m",
+                "invalid_value": 0.0,
+            },
+            "annotators": ["rgb", "distance_to_image_plane", "instance_segmentation"],
+            "camera_parent_translation_m": camera_local_translation.tolist(),
+            "orientation_strategy": "fixed_hand_local_pose",
+            "camera_horizontal_axis_world": camera_horizontal_world.tolist(),
+            "camera_optical_forward_axis_world": camera_forward_world.tolist(),
+            "camera_positive_z_axis_world": (-camera_forward_world).tolist(),
+            "camera_up_axis_world": camera_up_world.tolist(),
+            "camera_roll_degrees": camera_roll_degrees,
+            "initial_tilt_degrees": camera_tilt_degrees,
+            "initial_tilt_direction_source": "panda_hand_gripper",
+            "label_rotation_clockwise_degrees": 90.0,
+        }
+        camera_metadata_path = args.record.with_suffix(".camera.json")
+        camera_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        camera_metadata_path.write_text(json.dumps(camera_metadata, indent=2) + "\n")
+        print(f"Camera calibration saved to {camera_metadata_path}.", flush=True)
         camera_viewer_script = Path(__file__).with_name("opencv_camera_viewer.py")
+        camera_window_x = render_width
+        if app_window is not None:
+            app_window_x, _ = app_window.get_position()
+            app_window_width, _ = app_window.get_size()
+            camera_window_x = app_window_x + app_window_width + 16
         camera_viewer_env = os.environ.copy()
         for inherited_variable in (
             "PYTHONHOME",
@@ -219,6 +344,10 @@ try:
                 "640",
                 "--height",
                 "360",
+                "--x",
+                str(camera_window_x),
+                "--y",
+                "40",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -341,10 +470,17 @@ try:
             and now - last_camera_frame_time >= 1.0 / 30.0
         ):
             rgb_data, _ = on_hand_camera_sensor.get_data("rgb")
-            if rgb_data is not None:
+            depth_data, _ = on_hand_camera_sensor.get_data("distance_to_image_plane")
+            if rgb_data is not None and depth_data is not None:
                 rgb_frame = np.ascontiguousarray(rgb_data.numpy()[:, :, :3])
+                depth_meters = depth_data.numpy()[:, :, 0]
+                depth_millimeters = np.ascontiguousarray(
+                    np.clip(np.rint(depth_meters * 1000.0), 0, 65535).astype(np.uint16)
+                )
                 try:
-                    camera_viewer_process.stdin.write(rgb_frame.tobytes())
+                    camera_viewer_process.stdin.write(
+                        rgb_frame.tobytes() + depth_millimeters.tobytes()
+                    )
                     camera_viewer_process.stdin.flush()
                     last_camera_frame_time = now
                 except (BrokenPipeError, OSError):
