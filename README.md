@@ -345,7 +345,7 @@ flowchart TD
 ./run.sh --disks 3 --show-panels
 
 # 顯示 panda_hand 上的即時 RGB-D 相機影像（按 q 關閉預覽，不停止模擬）
-./run.sh --disks 2 --on-hand-camera
+./run.sh --disks 3 --on-hand-camera
 ```
 
 首次使用手上相機前，在專案 `.venv` 安裝 GUI 版 OpenCV 與 NumPy。viewer 使用獨立 Python 程序，不會取代 Isaac Sim 內的 OpenCV：
