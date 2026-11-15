@@ -24,9 +24,12 @@ OpenCV 負責 MP4 編碼，兩者都不是 NVIDIA 資源。
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # =============================================================================
@@ -47,6 +50,17 @@ parser.add_argument(
     "--show-panels",
     action="store_true",
     help="保留 Isaac Sim 側邊與底部面板顯示（預設隱藏）",
+)
+parser.add_argument(
+    "--on-hand-camera",
+    action="store_true",
+    help="以 OpenCV 視窗顯示 panda_hand 上的即時 RGB 相機畫面",
+)
+parser.add_argument(
+    "--opencv-viewer-python",
+    type=Path,
+    default=Path(__file__).resolve().parent / ".venv/bin/python",
+    help="顯示相機視窗用的 GUI Python（需安裝 requirements-camera-viewer.txt）",
 )
 parser.add_argument("--record", type=Path, help="將視口畫面儲存為 MP4 影片的路徑")
 parser.add_argument("--record-fps", type=int, default=30, help="錄製影片的每秒幀率 (FPS)")
@@ -75,6 +89,15 @@ if args.record is None:
 
 if args.record.suffix.lower() != ".mp4":
     parser.error("--record 輸出檔名後綴必須為 .mp4")
+recording_enabled = args.record is not None
+
+if args.on_hand_camera and args.headless:
+    parser.error("--on-hand-camera 需要圖形桌面，不能與 --headless 同時使用")
+if args.on_hand_camera and not args.opencv_viewer_python.is_file():
+    parser.error(
+        f"找不到 OpenCV viewer Python：{args.opencv_viewer_python}；"
+        "請安裝 GUI OpenCV，或指定 --opencv-viewer-python"
+    )
 
 render_width, render_height = (int(value) for value in args.resolution.split("x"))
 
@@ -91,6 +114,9 @@ simulation_app = SimulationApp(
     }
 )
 video_writer = None
+on_hand_camera_sensor = None
+camera_viewer_process = None
+cv2 = None
 
 try:
     import omni.kit.app
@@ -111,18 +137,21 @@ try:
 
     # NVIDIA Isaac Sim 擴充套件提供本專案使用的實驗性物件、Prim、材質及模擬管理 API。
     extension_manager = omni.kit.app.get_app().get_extension_manager()
-    for extension_name in (
+    extensions = (
         "isaacsim.core.experimental.objects",
         "isaacsim.core.experimental.materials",
         "isaacsim.core.experimental.prims",
         "isaacsim.core.experimental.utils",
         "isaacsim.core.simulation_manager",
         "isaacsim.storage.native",
-    ):
+    )
+    if args.on_hand_camera:
+        extensions += ("isaacsim.sensors.experimental.rtx",)
+    for extension_name in extensions:
         extension_manager.set_extension_enabled_immediate(extension_name, True)
 
     # NVIDIA Synthetic Data 感測器只在需要錄影時啟用，擷取視口 RGB 幀供 OpenCV 編碼。
-    if args.record:
+    if recording_enabled:
         extension_manager.set_extension_enabled_immediate("omni.syntheticdata", True)
 
     simulation_app.update()
@@ -136,6 +165,9 @@ try:
     from isaacsim.core.utils.viewports import set_camera_view
     if args.record:
         import cv2
+    if args.on_hand_camera:
+        from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
+    if recording_enabled:
         import omni.syntheticdata._syntheticdata as synthetic_data
         from omni.kit.viewport.utility import get_active_viewport
         from omni.syntheticdata import sensors
@@ -154,6 +186,46 @@ try:
         # 部分渲染面板可能在場景初始化期間建立，再隱藏一次確保不覆蓋視口。
         hide_workspace_panels()
 
+    if args.on_hand_camera:
+        hand_path = controller.robot.end_effector_link.paths[0]
+        camera_path = f"{hand_path}/OnHandCamera"
+        hand_camera = RtxCamera(camera_path, tick_rate=30.0)
+        hand_camera.set_local_poses(
+            translations=np.array([0.06, 0.0, 0.04]),
+            orientations=np.array([0.0, 1.0, 0.0, 0.0]),
+        )
+        hand_camera.camera.set_focal_lengths(12.0)
+        hand_camera.camera.set_clipping_ranges(0.01, 5.0)
+        on_hand_camera_sensor = CameraSensor(
+            hand_camera,
+            resolution=(360, 640),
+            annotators=["rgb"],
+        )
+        camera_viewer_script = Path(__file__).with_name("opencv_camera_viewer.py")
+        camera_viewer_env = os.environ.copy()
+        for inherited_variable in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "QT_PLUGIN_PATH",
+            "QT_QPA_PLATFORM_PLUGIN_PATH",
+            "QT_QPA_FONTDIR",
+        ):
+            camera_viewer_env.pop(inherited_variable, None)
+        camera_viewer_process = subprocess.Popen(
+            [
+                str(args.opencv_viewer_python),
+                str(camera_viewer_script),
+                "--width",
+                "640",
+                "--height",
+                "360",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            env=camera_viewer_env,
+        )
+        print(f"On-hand RGB camera ready at {camera_path} (640x360).", flush=True)
+
     # 設定最佳觀察相機視角（居中斜俯視角，清楚呈現 3 根柱子與手臂姿態）
     set_camera_view(
         # 相機在世界座標中的位置 [x, y, z]
@@ -164,7 +236,7 @@ try:
     )
 
     # 綁定錄影视窗與 RGB 感測器管線
-    if args.record:
+    if recording_enabled:
         args.record.parent.mkdir(parents=True, exist_ok=True)
         viewport = get_active_viewport()
         if viewport is None:
@@ -181,6 +253,7 @@ try:
     completed_moves = []
     logged_move_count = 0
     last_pose_log_time = 0.0
+    last_camera_frame_time = 0.0
 
     # =========================================================================
     # 模擬主循環 (Simulation Main Loop)
@@ -233,7 +306,7 @@ try:
             last_pose_log_time = now
 
         # NVIDIA 感測器提供 RGB；OpenCV 轉成 BGR 後寫入 MP4，這裡不疊加文字或檔名。
-        if args.record and simulation_app.is_running():
+        if recording_enabled and simulation_app.is_running():
             rgba = sensors.get_rgb(viewport)
             if rgba.ndim == 3 and rgba.shape[2] >= 3:
                 height, width = rgba.shape[:2]
@@ -243,14 +316,68 @@ try:
                         str(args.record), codec, args.record_fps, (width, height)
                     )
                     if not video_writer.isOpened():
-                        raise RuntimeError(f"無法建立 MP4 輸出檔：{args.record}")
-                frame_bgr = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2BGR)
-                video_writer.write(frame_bgr)
+                        video_writer.release()
+                        video_writer = None
+                        recording_enabled = False
+                        print(
+                            f"Warning: MP4 recording disabled because VideoWriter could not open "
+                            f"{args.record} at {width}x{height}; simulation and hand camera continue.",
+                            flush=True,
+                        )
+                if video_writer is not None:
+                    frame_bgr = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2BGR)
+                    video_writer.write(frame_bgr)
+
+        if camera_viewer_process is not None and camera_viewer_process.poll() is not None:
+            print("OpenCV camera window closed; simulation continues.", flush=True)
+            camera_viewer_process = None
+            on_hand_camera_sensor = None
+
+        if (
+            on_hand_camera_sensor is not None
+            and camera_viewer_process is not None
+            and camera_viewer_process.stdin is not None
+            and simulation_app.is_running()
+            and now - last_camera_frame_time >= 1.0 / 30.0
+        ):
+            rgb_data, _ = on_hand_camera_sensor.get_data("rgb")
+            if rgb_data is not None:
+                rgb_frame = np.ascontiguousarray(rgb_data.numpy()[:, :, :3])
+                try:
+                    camera_viewer_process.stdin.write(rgb_frame.tobytes())
+                    camera_viewer_process.stdin.flush()
+                    last_camera_frame_time = now
+                except (BrokenPipeError, OSError):
+                    print("OpenCV camera viewer exited; simulation continues.", flush=True)
+                    camera_viewer_process = None
+                    on_hand_camera_sensor = None
 
         # 留一秒讓使用者看到結束狀態，並讓最後的錄影影格寫入後再關閉應用程式。
         if completed and completion_time is not None and time.monotonic() - completion_time >= 1.0:
             break
+except BaseException as error:
+    print(f"Simulation stopped by {type(error).__name__}: {error}", flush=True)
+    raise
 finally:
+    # 先關閉相機 viewer 與 render product，再關閉 SimulationApp。
+    if "controller" in locals() and not completed:
+        print(
+            "Isaac Sim exited before the Hanoi task reached a terminal state "
+            f"({controller._move_index}/{len(controller._moves)} moves committed).",
+            flush=True,
+        )
+    if camera_viewer_process is not None:
+        if camera_viewer_process.stdin is not None:
+            try:
+                camera_viewer_process.stdin.close()
+            except OSError:
+                pass
+        try:
+            camera_viewer_process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            camera_viewer_process.terminate()
+            camera_viewer_process.wait()
+    on_hand_camera_sensor = None
     # 釋放影片寫入器資源並關閉 SimulationApp
     try:
         if video_writer is not None:

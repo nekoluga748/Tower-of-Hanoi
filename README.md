@@ -343,6 +343,15 @@ flowchart TD
 
 # 顯示 Isaac Sim 側邊與底部面板（預設隱藏）
 ./run.sh --disks 3 --show-panels
+
+# 顯示 panda_hand 上的即時相機影像（按 q 關閉相機視窗，不停止模擬）
+./run.sh --disks 3 --on-hand-camera
+```
+
+首次使用手上相機時，需在專案 `.venv` 安裝支援 GUI 的 OpenCV（它在獨立 viewer 程序執行，不取代 Isaac Sim 內的 OpenCV）：
+
+```bash
+pip3 --python .venv/bin/python install -r requirements-camera-viewer.txt
 ```
 
 > **支援層數範圍**：`--disks` 參數可接受 2 至 10（對應 3 至 1023 步）。
@@ -352,6 +361,7 @@ flowchart TD
 > `recordings/hanoi_3disks_時間戳.csv`。預設不輸出末端姿態；使用
 > `--log-end-effector-pose true` 才會開啟 20 Hz 診斷列印。
 > `--resolution` 會同時設定模擬視窗與錄影影格大小；解析度越低，影片檔案通常越小。
+> `--on-hand-camera` 會在 `panda_hand` 下建立 640×360 RGB 相機，並用獨立 OpenCV 視窗顯示；按 `q` 可關閉預覽，模擬繼續執行。需要圖形桌面與 GUI 版 OpenCV，不能搭配 `--headless`。
 > 預設會在場景建立前隱藏 Stage、Property、Content、Console、Timeline 與 Render Settings 面板，任務結束後保留 1 秒再自動關閉 Isaac Sim；使用 `--show-panels` 可保留面板。
 
 ---
