@@ -2,6 +2,7 @@ import unittest
 
 from hanoi_tower.planner import (
     plan_hanoi,
+    plan_hanoi_from_state,
     required_lift_height,
     smoothstep_fraction,
     smooth_velocity_scale,
@@ -53,6 +54,28 @@ class HanoiPlannerTests(unittest.TestCase):
             stacks[destination].append(disk_index)
 
         self.assertEqual(stacks, [[], [], list(range(disk_count - 1, -1, -1))])
+
+    def test_plan_from_mixed_initial_state_is_legal_and_reaches_destination(self):
+        stacks = [[2], [1, 0], []]
+
+        moves = plan_hanoi_from_state(stacks, disk_count=3)
+
+        for disk_index, source, destination in moves:
+            self.assertTrue(stacks[source])
+            self.assertEqual(stacks[source][-1], disk_index)
+            if stacks[destination]:
+                self.assertGreater(stacks[destination][-1], disk_index)
+            stacks[source].pop()
+            stacks[destination].append(disk_index)
+
+        self.assertEqual(stacks, [[], [], [2, 1, 0]])
+
+    def test_plan_from_goal_state_has_no_moves(self):
+        self.assertEqual(plan_hanoi_from_state([[], [], [2, 1, 0]], disk_count=3), [])
+
+    def test_plan_from_state_rejects_illegal_stack(self):
+        with self.assertRaises(ValueError):
+            plan_hanoi_from_state([[0, 1], [2], []], disk_count=3)
 
     def test_rejects_empty_puzzle(self):
         with self.assertRaises(ValueError):
