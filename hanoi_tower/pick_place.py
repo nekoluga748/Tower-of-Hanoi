@@ -351,10 +351,12 @@ class FrankaPickPlace:
                 self._phase_start_position = curr_pos[0].copy()   # 起點：當前安全高度
                 self._grasp_close_start_step = None
 
-                # 計算 V 形底部：方塊頂面上方 approach_height 處
+                # 抓取目標由實際盤面頂部加安全間距決定，不隨盤數改變積木厚度。
                 cube_pos = self.cube.get_world_poses()[0].numpy()[0]
                 self._v_bottom_pos = np.array([
-                    cube_pos[0], cube_pos[1], cube_pos[2] + self.approach_height
+                    cube_pos[0],
+                    cube_pos[1],
+                    cube_pos[2] + self.cube_size[2] / 2 + self.approach_height,
                 ])
                 # 計算 V 形頂部（提升目標）：安全巡航高度
                 safe_z = max(

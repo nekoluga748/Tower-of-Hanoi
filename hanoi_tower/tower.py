@@ -51,8 +51,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.disk_count = disk_count
         self._random_init = random_init
         self._rng = np.random.default_rng(seed)
-        # 盤厚隨盤數調整並限制範圍；尺寸以公尺表示，幾何中心高度由 _disk_position 計算。
-        self.disk_thickness = float(np.clip(0.12 / disk_count, 0.012, 0.025))
+        # 盤厚固定為 25 mm；增加盤數只增加堆疊高度，不縮放積木尺寸。
+        self.disk_thickness = 0.025
         # 三根柱子（放置區）在世界座標系中的 (X, Y) 位置
         # 柱子間距收斂至 [-0.28, 0.0, +0.28]，遠離機械手臂全伸展奇異點
         self.peg_positions = np.array([[0.48, -0.28], [0.48, 0.0], [0.48, 0.28]])
@@ -82,7 +82,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         # 各階段運動參數配置
         self.pregrasp_height = 0.20          # 移動至上方時的初始離地高度
-        self.approach_height = 0.106         # 抓取點較原設定提高 1 cm
+        self.approach_height = 0.0885        # 盤面頂部至手掌目標；比原目標低 5 mm 以增加指尖咬合
         self._default_approach_height = self.approach_height
         self.lift_height = 0.14              # 抓起後的提升高度
         self.retreat_height = 0.16           # 放置完畢後的垂直退避高度
@@ -293,13 +293,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
     def _safe_transit_z(self) -> float:
         """依目前最高符號堆疊估算水平搬運與撤離時的末端巡航安全 Z 高度。
 
-        估算式以最高堆疊頂面、抓取高度、半盤厚及 8cm 安全裕度相加，並將最大允許
+        估算式以最高堆疊頂面、抓取安全間距及 8cm 安全裕度相加，並將最大允許
         高度上限放大至 0.46m，確保高層數搬運與退避撤離時絕對不碰撞任何柱子上的方塊。
         """
         tallest_stack = max(len(stack) for stack in self._stacks)
         tallest_stack_top = tallest_stack * self.disk_thickness
         margin = 0.08  # 放大防撞裕度至 8cm
-        computed = tallest_stack_top + self.approach_height + self.disk_thickness / 2 + margin
+        computed = tallest_stack_top + self.approach_height + margin
         return float(np.clip(computed, 0.28, 0.46))
 
     def _activate_current_move(self) -> None:
@@ -369,7 +369,9 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         disk_position = self.cube.get_world_poses()[0].numpy()[0]
         minimum_approach_height = max(
             0.0,
-            self.minimum_hand_target_z - float(disk_position[2]),
+            self.minimum_hand_target_z
+            - float(disk_position[2])
+            - self.disk_thickness / 2,
         )
         next_approach_height = max(
             minimum_approach_height,
@@ -392,7 +394,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._grasp_object_offset = None
         print(
             f"Grasp not confirmed; returning to clearance and probing down "
-            f"{probe_distance:.3f} m once at {self.approach_height:.3f} m approach height."
+            f"{probe_distance:.3f} m once with {self.approach_height:.3f} m clearance above the disk."
         )
         return True
 
