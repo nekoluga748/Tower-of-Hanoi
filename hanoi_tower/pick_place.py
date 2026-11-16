@@ -82,19 +82,11 @@ class FrankaPickPlace:
         self.robot_name = robot_name
 
         # ── 5 階段有限狀態機時長設定（單位：模擬步數 @ 60Hz）────────────────
-        # 各階段步數優化（總步數由 325 步降至 244 步，畫面播放速度提升 25% 以上）：
-        # Phase 0: 橫向巡航至方塊上方 (30 步)
-        # Phase 1: V 形抓取（下潛 + 閉爪 + 提升，共 60 步）
-        # Phase 2: 水平搬運至目標柱上方 (48 步)
-        # Phase 3: 垂直緩降至放置位置 (68 步，高精度 5mm 觸地收斂)
-        # Phase 4: 開爪釋放 + 垂直退避 (38 步，退避至高空安全走廊)
-        self.events_dt = events_dt if events_dt is not None else [
-            30,   # Phase 0: 橫向巡航
-            60,   # Phase 1: V 形抓取（下潛 1/3 + 閉爪中間 1/3 + 提升 1/3）
-            48,   # Phase 2: 水平搬運
-            68,   # Phase 3: 垂直緩降（5mm 嚴格收斂，2 倍高精度）
-            38,   # Phase 4: 開爪釋放 + 退避
-        ]
+        # 所有動作與等待步數均按 1.5 倍播放速度縮短，位置收斂門檻維持原值。
+        # Nominal Phase durations in simulation frames, scaled uniformly below.
+        self.playback_speed = 1.5
+        phase_durations = events_dt if events_dt is not None else [30, 60, 48, 68, 38]
+        self.events_dt = [self._scale_steps(duration) for duration in phase_durations]
 
         # ── 運動幾何參數 ───────────────────────────────────────────────────────
         self.pregrasp_height = 0.22   # 橫向巡航時末端執行器距方塊中心的垂直距離 (m)
@@ -114,6 +106,10 @@ class FrankaPickPlace:
 
         # ── 任務完成旗標 ──────────────────────────────────────────────────────
         self._pose_target_failed = False    # 偵測到放置位姿未達標的錯誤旗標
+
+    def _scale_steps(self, steps: int | float) -> int:
+        """Convert a nominal simulation-frame duration to the selected playback speed."""
+        return max(1, int(round(float(steps) / self.playback_speed)))
 
     # ──────────────────────────────────────────────────────────────────────────
     # 軌跡插值核心：S 曲線 (Smoothstep)
@@ -185,7 +181,7 @@ class FrankaPickPlace:
 
         Phase 0–2 在走過額定時間 70% 且位置誤差小於 tolerance (12mm) 時可提早結束；
         Phase 3、4 必須至少走完額定影格並分別達 5 mm、8 mm 高精度門檻。任何 Phase
-        超過額定時間 35 影格仍未收斂時會強制前進，避免控制器永久卡住。
+        超過按播放速度縮放的逾時影格仍未收斂時會強制前進，避免控制器永久卡住。
         """
         self._step += 1
         phase_duration = max(1, int(self.events_dt[self._event]))
@@ -194,7 +190,7 @@ class FrankaPickPlace:
 
         # Phase 3 和 Phase 4 必須完整執行至收斂，不允許提早跳出
         if self._event not in (3, 4):
-            early_step = max(6, int(phase_duration * 0.70))
+            early_step = max(self._scale_steps(6), int(phase_duration * 0.70))
             if self._step >= early_step and err <= tolerance:
                 self._next_phase()
                 return
@@ -206,7 +202,7 @@ class FrankaPickPlace:
             else:                  thresh = tolerance
             if err <= thresh:
                 self._next_phase()
-            elif self._step >= phase_duration + 35:
+            elif self._step >= phase_duration + self._scale_steps(35):
                 # 超時強制推進（逾時保護，防止動畫卡死）
                 self._next_phase()
 
@@ -344,9 +340,9 @@ class FrankaPickPlace:
         elif self._event == 1:
             total = max(3, int(self.events_dt[1]))
             descent_steps = total // 3
-            settle_min_steps = max(8, total // 8)
+            settle_min_steps = max(self._scale_steps(8), total // 8)
             settle_max_steps = max(settle_min_steps, total // 3)
-            close_steps = max(12, total // 3)
+            close_steps = max(self._scale_steps(12), total // 3)
             lift_steps = max(1, total // 3)
 
             # ── 在 Phase 1 第 0 步：一次性鎖定安全起點與計算各段目標 ──────
@@ -449,8 +445,8 @@ class FrankaPickPlace:
         #   後 3/4 步：S 曲線從釋放位置平滑退避至安全高度
         # ──────────────────────────────────────────────────────────────────────
         elif self._event == 4:
-            total    = max(4, int(self.events_dt[4]))
-            open_seg = max(2, total // 4)   # 前 1/4 步用於開爪靜置
+            total    = max(self._scale_steps(4), int(self.events_dt[4]))
+            open_seg = max(self._scale_steps(2), total // 4)   # 前 1/4 步用於開爪靜置
 
             if self._step == 0:
                 _, curr_pos, _ = self.robot.get_current_state()
@@ -491,7 +487,7 @@ class FrankaPickPlace:
                 err = float(np.linalg.norm(
                     curr_pos - np.asarray(self._retreat_target_position).reshape(1, 3)
                 ))
-                if err <= 0.015 or self._step >= total + 40:
+                if err <= 0.015 or self._step >= total + self._scale_steps(40):
                     self._next_phase()
 
         return True
