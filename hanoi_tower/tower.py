@@ -433,7 +433,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             self._activate_current_move()
 
         # 在 Phase 1 下潛段轉入底部等待時記錄盤子與手部相對位姿，用於修正末端目標。
-        seg = max(3, int(self.events_dt[1])) // 3
+        seg = max(self._scale_steps(3), int(self.events_dt[1])) // 3
         if self._event == 1 and self._step == seg:
             # 記錄方塊相對夾爪偏移，以修正抓取後搬運的末端目標
             disk_position = self.cube.get_world_poses()[0].numpy()
@@ -449,7 +449,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             self._event == 1
             and self._grasp_close_start_step is not None
             and self._step
-            == self._grasp_close_start_step + max(12, int(self.events_dt[1]) // 3)
+            == self._grasp_close_start_step
+            + max(self._scale_steps(12), int(self.events_dt[1]) // 3)
         ):
             disk_position = self.cube.get_world_poses()[0].numpy()
             _, hand_position, _ = self.robot.get_current_state()
