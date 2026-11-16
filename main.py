@@ -41,6 +41,8 @@ parser.add_argument("--headless", action="store_true", help="無圖形介面背�
 parser.add_argument("--test", action="store_true", help="相容舊用法；任務結束後皆會自動退出")
 parser.add_argument("--disks", type=int, choices=range(2, 11), default=3, help="河內塔層數（支援 2 至 10 層，最大 1023 步）")
 parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="物理模擬計算後端 (cpu 或 cuda)")
+parser.add_argument("--random-init", action="store_true", help="隨機打散初始堆疊（盤子不一定全在 A 柱）")
+parser.add_argument("--seed", type=int, default=None, help="隨機種子，指定後每次執行產生相同的隨機初始配置")
 parser.add_argument(
     "--resolution",
     choices=("640x360", "960x540", "1280x720"),
@@ -187,7 +189,7 @@ try:
     simulation_app.update()
 
     # 實例化河內塔控制器並在 USD Stage 中建立物件幾何與物理碰撞體
-    controller = FrankaTowerOfHanoi(disk_count=args.disks)
+    controller = FrankaTowerOfHanoi(disk_count=args.disks, random_init=args.random_init, seed=args.seed)
     controller.setup_scene()
     simulation_app.update()
     if not args.show_panels:

@@ -11,10 +11,15 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 # 移動步驟元組定義：(盤子索引, 來源柱編號, 目標柱編號)
 # 盤子索引 0 對應 D1（最小盤），索引 i 對應 D(i+1)，數字越大盤子越大
 # 柱子編號：0 (起始柱), 1 (輔助柱), 2 (目標柱)
 Move = tuple[int, int, int]
+
+# 狀態型別：三根柱子各自的盤子堆疊由底至頂（不可變 tuple）
+_State = tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
 
 
 def smoothstep_fraction(step: int, total_steps: int) -> float:
@@ -166,3 +171,124 @@ def plan_hanoi(disk_count: int) -> list[Move]:
     # 初始化柱位：0 為來源、2 為目標、1 為暫存。
     move_stack(disk_count, 0, 2, 1)
     return moves
+
+
+def _state_neighbors(state: _State) -> list[tuple[_State, Move]]:
+    """列舉從給定狀態出發的所有合法單步移動。
+
+    對每根柱子的頂盤，嘗試移到其他兩根柱子：
+    若目標柱為空，或目標柱頂盤的索引（尺寸）大於來源頂盤索引，則移動合法
+    （索引越大代表盤子越大；不能把大盤疊到小盤上）。
+
+    Args:
+        state: 目前的三柱堆疊狀態（tuple of tuple，不可變）。
+
+    Returns:
+        (新狀態, Move) 配對的清單；Move 為 (盤子索引, 來源柱, 目標柱)。
+    """
+    neighbors: list[tuple[_State, Move]] = []
+    stacks = [list(s) for s in state]  # 轉成可變副本
+
+    for src in range(3):
+        if not stacks[src]:
+            continue  # 來源柱為空，無法移動
+        top_disk = stacks[src][-1]
+
+        for dst in range(3):
+            if src == dst:
+                continue
+            # 合法條件：目標柱為空，或目標柱頂盤比當前頂盤大
+            if not stacks[dst] or stacks[dst][-1] > top_disk:
+                new_stacks = [list(s) for s in stacks]
+                new_stacks[src].pop()
+                new_stacks[dst].append(top_disk)
+                new_state: _State = tuple(tuple(s) for s in new_stacks)
+                neighbors.append((new_state, (top_disk, src, dst)))
+
+    return neighbors
+
+
+def plan_hanoi_from_state(
+    initial_stacks: list[list[int]],
+    disk_count: int,
+    goal_peg: int = 2,
+) -> list[Move]:
+    """以 BFS 在 3^N 狀態圖中找從任意合法初始配置到目標柱的最優移動序列。
+
+    河內塔的合法狀態空間是一個有向圖：每個節點是一個符合「大在下小在上」約束的
+    三柱堆疊配置，共有 3^N 個節點（N 個盤子，每盤可在三根柱子之一）。BFS 在此圖
+    中尋找從 initial_state 到 goal_state 的最短路徑，回傳最優移動序列。
+
+    與 plan_hanoi() 的差異：plan_hanoi() 僅支援「所有盤子從柱 0 移到柱 2」的
+    標準問題；本函式接受任意合法初始狀態，因此支援隨機初始堆疊。
+
+    時間複雜度：O(3^N × N)，N≤10 約 60K 節點，遠小於毫秒等級的瓶頸。
+    空間複雜度：O(3^N)，存放 visited 與 parent 字典。
+
+    Args:
+        initial_stacks: 初始三柱堆疊，格式為 [[柱0盤子從底到頂], [柱1], [柱2]]；
+            盤子以 0 起算的索引表示，0 為最小盤，disk_count-1 為最大盤。
+        disk_count: 盤子總數，用於建立目標狀態。
+        goal_peg: 目標柱編號（預設 2，即 C 柱）。
+
+    Returns:
+        最優移動序列，格式同 plan_hanoi()：list of (disk_index, src_peg, dst_peg)。
+        若初始狀態已等於目標狀態，回傳空清單。
+
+    Raises:
+        ValueError: 初始堆疊不合法（盤數不符、大盤疊在小盤上）。
+        ValueError: initial_stacks 中盤子總數不等於 disk_count。
+    """
+    # ── 驗證輸入 ─────────────────────────────────────────────────────────────
+    all_disks = [d for peg in initial_stacks for d in peg]
+    if sorted(all_disks) != list(range(disk_count)):
+        raise ValueError(
+            f"initial_stacks 包含的盤子索引不正確：期望 0~{disk_count - 1}，"
+            f"實際 {sorted(all_disks)}"
+        )
+    for peg_idx, peg in enumerate(initial_stacks):
+        for i in range(len(peg) - 1):
+            if peg[i] < peg[i + 1]:
+                raise ValueError(
+                    f"柱 {peg_idx} 違反約束：盤 {peg[i]} 在盤 {peg[i + 1]} 下方，但前者較小"
+                )
+
+    # ── 建立起始與目標狀態 ───────────────────────────────────────────────────
+    # 目標狀態：所有盤子從大到小（底到頂）排在 goal_peg；其餘柱子為空
+    goal_disks = tuple(range(disk_count - 1, -1, -1))  # 底→頂：最大盤先，最小盤後
+    goal_parts: list[tuple[int, ...]] = [tuple() for _ in range(3)]
+    goal_parts[goal_peg] = goal_disks
+    goal_state: _State = tuple(goal_parts)  # type: ignore[arg-type]
+
+    start_state: _State = tuple(tuple(peg) for peg in initial_stacks)  # type: ignore[arg-type]
+
+    if start_state == goal_state:
+        return []  # 已在目標，不需任何移動
+
+    # ── BFS ──────────────────────────────────────────────────────────────────
+    # parent[state] = (prev_state, move) 用於回溯路徑；起點的 parent 設為 None
+    parent: dict[_State, tuple[_State, Move] | None] = {start_state: None}
+    queue: deque[_State] = deque([start_state])
+
+    while queue:
+        current = queue.popleft()
+        for next_state, move in _state_neighbors(current):
+            if next_state in parent:
+                continue
+            parent[next_state] = (current, move)
+            if next_state == goal_state:
+                # 找到目標，回溯建立移動序列
+                path: list[Move] = []
+                state = next_state
+                while parent[state] is not None:
+                    prev, m = parent[state]
+                    path.append(m)
+                    state = prev
+                path.reverse()
+                return path
+            queue.append(next_state)
+
+    # 理論上 3 根柱子的合法狀態圖是強連通的，不應到達這裡
+    raise ValueError(
+        f"BFS 無法從初始狀態到達目標柱 {goal_peg}；請檢查 initial_stacks 是否合法"
+    )

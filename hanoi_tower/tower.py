@@ -18,7 +18,7 @@ from isaacsim.core.experimental.materials import RigidBodyMaterial
 from isaacsim.core.experimental.prims import GeomPrim, RigidPrim
 import isaacsim.core.experimental.utils.stage as stage_utils
 
-from .planner import Move, plan_hanoi, required_lift_height
+from .planner import Move, plan_hanoi, plan_hanoi_from_state, required_lift_height
 from .pick_place import FrankaPickPlace
 
 
@@ -32,11 +32,14 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
     重降。只有基礎 FSM 完成且檢查未使任務失敗，符號堆疊才提交該筆移動。
     """
 
-    def __init__(self, disk_count: int = 3) -> None:
+    def __init__(self, disk_count: int = 3, random_init: bool = False, seed: int | None = None) -> None:
         """建立 Hanoi 任務參數及初始符號堆疊。
 
         參數：
-            disk_count: 盤子數量，支援 2 至 10 盤；移動數為 2**disk_count - 1。
+            disk_count: 盤子數量，支援 2 至 10 盤；移動數為 2**disk_count - 1（標準）或
+                BFS 最優步數（隨機初始）。
+            random_init: 為 True 時隨機打散初始堆疊，並以 BFS 規劃最優解至 C 柱。
+            seed: 隨機種子；未提供時每次執行結果不同，提供時可重現相同配置。
 
         disk_widths 由小至大排列，索引 0 是頂層最小盤；_stacks[0] 以底盤在前、
         頂盤在後保存初始順序。實際幾何單位為公尺，物理姿態由 Isaac Sim 回報。
@@ -46,6 +49,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         super().__init__(robot_name="Hanoi")
         self.disk_count = disk_count
+        self._random_init = random_init
+        self._rng = np.random.default_rng(seed)
         # 盤厚隨盤數調整並限制範圍；尺寸以公尺表示，幾何中心高度由 _disk_position 計算。
         self.disk_thickness = float(np.clip(0.12 / disk_count, 0.012, 0.025))
         # 三根柱子（放置區）在世界座標系中的 (X, Y) 位置
@@ -86,17 +91,20 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.grasp_xy_tolerance = 0.018      # 抓取提升過程允許的水平滑移容許值（精度細化至原本 2 倍）
         self.carry_tracking_tolerance = 0.035 # 水平搬運過程方塊相對夾爪的滑移容許值
         self.placement_tolerance = 0.038     # 最終放置誤差容許值（精度細化至原本 2 倍）
-        self.max_pickup_attempts = 3         # 抓取失敗最大重試次數
+        self.pickup_probe_step = 0.005       # 抓取失敗時最多單次向下探 5 mm
+        self.minimum_hand_target_z = 0.11    # 手掌目標離地至少 11 cm，保留夾爪與地面淨空
+        self.max_pickup_attempts = 2         # 初次抓取加一次受限下探
 
         # 實體剛體與狀態變數
         self.disks: list[RigidPrim] = []
+        # 符號堆疊：先以標準配置初始化，setup_scene() 中若啟用隨機初始會覆寫。
+        self._stacks: list[list[int]] = [list(range(disk_count - 1, -1, -1)), [], []]
+        self._initial_stacks: list[list[int]] = [list(s) for s in self._stacks]
+        # 移動序列：標準模式用遞迴最優解；隨機模式在 setup_scene() 覆寫為 BFS 解。
         self._moves: list[Move] = plan_hanoi(disk_count)
         self._move_index = 0
-        # 符號堆疊由底至頂存盤子索引；起始時所有盤子都在 Peg 0。
-        self._stacks: list[list[int]] = [list(range(disk_count - 1, -1, -1)), [], []]
         self._pickup_attempts = 0
         self._pickup_start_z: float | None = None
-        self._pickup_start_xy: np.ndarray | None = None
         self._grasp_object_offset: np.ndarray | None = None
         self._destination_disk_position: np.ndarray | None = None
         self._placement_corrections = 0
@@ -108,6 +116,38 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         width = self.disk_widths[disk_index]
         return np.array([width, width, self.disk_thickness])
 
+    def _generate_random_stacks(self) -> list[list[int]]:
+        """隨機產生一個合法的三柱初始堆疊配置，且不與目標狀態相同。
+
+        演算法：由最大盤（索引 disk_count-1）到最小盤（索引 0）依序處理，
+        每個盤子隨機選擇一根柱子放置。由於大盤先放、小盤後放，自動保證
+        每根柱子內「大在下、小在上」的合法性約束。
+
+        目標狀態（全在 C 柱）會被排除，確保至少有 1 個移動步驟需要執行。
+        若盤子數 >= 2，隨機配置幾乎不可能恰好是目標狀態（概率 1/3^N），
+        最多重試 100 次即可保證找到非目標配置。
+
+        Returns:
+            三根柱子的堆疊配置，格式為 [[柱0盤子從底到頂], [柱1], [柱2]]。
+        """
+        # 目標狀態：全在柱 2（C 柱），由大到小堆疊
+        goal_stacks = [[], [], list(range(self.disk_count - 1, -1, -1))]
+
+        for _attempt in range(100):
+            stacks: list[list[int]] = [[], [], []]
+            # 由最大盤到最小盤依序分配（保證大在下、小在上）
+            for disk_index in range(self.disk_count - 1, -1, -1):
+                peg = int(self._rng.integers(0, 3))
+                stacks[peg].append(disk_index)
+            if stacks != goal_stacks:
+                return stacks
+
+        # 極罕見情況（全部嘗試都恰好是目標態），fallback：把最小盤放到 A 柱
+        fallback = [[], [], list(range(self.disk_count - 1, -1, -1))]
+        fallback[2].pop()          # 移除最小盤（索引 0）
+        fallback[0].append(0)      # 放到 A 柱
+        return fallback
+
     def _disk_position(self, disk_index: int, peg_index: int, level: int) -> np.ndarray:
         """依柱位與堆疊層數計算盤子幾何中心的世界座標。
 
@@ -118,17 +158,50 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         center_z = (level + 0.5) * self.disk_thickness
         return np.array([peg_x, peg_y, center_z])
 
+    def _initial_disk_position(self, disk_index: int) -> np.ndarray:
+        """依 _initial_stacks 查詢盤子的初始世界座標（幾何中心）。
+
+        掃描三根柱子找出 disk_index 所在的位置與層數，再以 _disk_position() 換算。
+        """
+        for peg_index, peg in enumerate(self._initial_stacks):
+            if disk_index in peg:
+                level = peg.index(disk_index)  # peg 由底至頂，index 即層數
+                return self._disk_position(disk_index, peg_index, level)
+        raise RuntimeError(f"disk {disk_index} 不在 _initial_stacks 中")
+
     def setup_scene(self) -> None:
         """在目前 USD Stage 建立 Franka、盤子剛體、地面、柱框標籤及物理材質。
 
+        若 random_init=True，先產生隨機合法初始堆疊並記錄到 _initial_stacks，
+        再依堆疊決定每個盤子的初始世界座標；標準模式則全部放在 A 柱。
         透過 NVIDIA Isaac Sim 的 Cube、GeomPrim、RigidPrim 和
         RigidBodyMaterial API 建立或包裝幾何；盤子加入碰撞 API，標記僅作視覺用途。
-        建立完成後載入第一筆遞迴移動，但尚未播放模擬；應用入口會啟動 Timeline 並 reset。
+        建立完成後載入第一筆移動，但尚未播放模擬；應用入口會啟動 Timeline 並 reset。
         """
+        # ── 決定初始堆疊配置 ─────────────────────────────────────────────────
+        if self._random_init:
+            self._initial_stacks = self._generate_random_stacks()
+            self._stacks = [list(s) for s in self._initial_stacks]
+            mode_desc = "隨機初始堆疊"
+        else:
+            # 標準模式：所有盤子在 A 柱（由大到小堆疊）
+            self._initial_stacks = [list(range(self.disk_count - 1, -1, -1)), [], []]
+            self._stacks = [list(s) for s in self._initial_stacks]
+            mode_desc = "標準初始堆疊（全在 A 柱）"
+
+        # 印出初始配置讓使用者一眼確認
+        peg_names = ("A", "B", "C")
+        stack_desc = "  ".join(
+            f"{peg_names[i]}:[{','.join(f'D{d+1}' for d in self._initial_stacks[i])}]"
+            for i in range(3)
+        )
+        print(f"[Hanoi] {mode_desc}: {stack_desc}", flush=True)
+
         bottom_disk = self.disk_count - 1
-        # 初始化基底場景與機械手臂
+
+        # ── 基底場景與機械手臂（以最大盤的初始位置傳給父類別）─────────────────
         super().setup_scene(
-            cube_initial_position=self._disk_position(bottom_disk, 0, 0),
+            cube_initial_position=self._initial_disk_position(bottom_disk),
             cube_size=self._disk_size(bottom_disk),
             target_position=self._disk_position(0, 2, 0) + np.array([0.0, 0.0, 0.1]),
             cube_path=f"/World/Hanoi/disks/disk_{bottom_disk}",
@@ -137,12 +210,12 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.disks = [None] * self.disk_count
         self.disks[bottom_disk] = self.cube
 
-        # 基礎控制器先建立最底盤；其餘盤子按索引遞增建立，世界 Z 由底往上排列。
+        # ── 其餘盤子依初始堆疊位置建立 ───────────────────────────────────────
         for disk_index in range(bottom_disk):
             disk_path = f"/World/Hanoi/disks/disk_{disk_index}"
             Cube(
                 paths=disk_path,
-                positions=self._disk_position(disk_index, 0, bottom_disk - disk_index),
+                positions=self._initial_disk_position(disk_index),
                 sizes=1.0,
                 scales=self._disk_size(disk_index),
                 colors=self.disk_colors[disk_index % len(self.disk_colors)],
@@ -208,7 +281,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         )
         disk_geometry.apply_physics_materials(disk_material)
 
-        # 啟動第一個搬運步驟
+        # ── 依初始堆疊產生移動規劃序列，並啟動第一步 ────────────────────────
+        if self._random_init:
+            self._moves = plan_hanoi_from_state(self._initial_stacks, self.disk_count)
+            print(f"[Hanoi] BFS 規劃完成，共需 {len(self._moves)} 步。", flush=True)
+        else:
+            self._moves = plan_hanoi(self.disk_count)
+
         self._activate_current_move()
 
     def _safe_transit_z(self) -> float:
@@ -267,16 +346,16 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.approach_height = self._default_approach_height
         self._pickup_attempts = 0
         self._pickup_start_z = None
-        self._pickup_start_xy = None
         self._grasp_object_offset = None
         self._placement_corrections = 0
         self._placement_correction_active = False
 
     def _retry_failed_pickup(self) -> bool:
-        """未確認盤子被抬起時，重設 FSM 並以較低抓取目標重試。
+        """未確認盤子被抬起時，回到安全高度並進行一次受限下探。
 
-        抬升不足或水平漂移超過閾值時呼叫。重試會重新張爪、清除取物基準並把
-        approach_height 降低 25 mm；達到最大嘗試次數則設定 _failed，停止後續移動。
+        抬升不足或水平漂移超過閾值時呼叫。最多向下探 pickup_probe_step，且
+        手掌世界 Z 目標不得低於 minimum_hand_target_z；若沒有安全空間或探測仍失敗，
+        設定 _failed 停止後續移動。
         回傳值表示是否允許繼續任務。
         """
         self._pickup_attempts += 1
@@ -284,23 +363,36 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         if self._pickup_attempts >= self.max_pickup_attempts:
             self._failed = True
-            print("Hanoi stopped: disk was not lifted after three grasp attempts.")
+            print("Hanoi stopped: disk was not lifted after one safe downward probe.")
             return False
 
-        # 下次重試時稍微下壓 2.5cm，加深抓取深度
-        self.approach_height = max(
-            0.035,
-            self._default_approach_height - 0.025 * self._pickup_attempts,
+        disk_position = self.cube.get_world_poses()[0].numpy()[0]
+        minimum_approach_height = max(
+            0.0,
+            self.minimum_hand_target_z - float(disk_position[2]),
         )
+        next_approach_height = max(
+            minimum_approach_height,
+            self.approach_height - self.pickup_probe_step,
+        )
+        probe_distance = self.approach_height - next_approach_height
+        if probe_distance <= 1e-6:
+            self._failed = True
+            print(
+                "Hanoi stopped: no safe downward probe remains; "
+                f"hand target must stay at or above {self.minimum_hand_target_z:.3f} m."
+            )
+            return False
+
+        self.approach_height = next_approach_height
         self._event = 0
         self._step = 0
         self._phase_start_position = None
         self._pickup_start_z = None
-        self._pickup_start_xy = None
         self._grasp_object_offset = None
         print(
-            f"Grasp not confirmed; retrying at {self.approach_height:.3f} m approach height "
-            f"({self._pickup_attempts + 1}/{self.max_pickup_attempts})."
+            f"Grasp not confirmed; returning to clearance and probing down "
+            f"{probe_distance:.3f} m once at {self.approach_height:.3f} m approach height."
         )
         return True
 
@@ -340,13 +432,11 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             self._phase_start_position = None
             self._activate_current_move()
 
-        # 在 Phase 1 下潛段轉入底部等待時記錄盤子與手部相對位姿，作為後續抬升檢查基準。
+        # 在 Phase 1 下潛段轉入底部等待時記錄盤子與手部相對位姿，用於修正末端目標。
         seg = max(3, int(self.events_dt[1])) // 3
         if self._event == 1 and self._step == seg:
-            # 記錄方塊在 V 形底部的位置與相對夾爪偏移
+            # 記錄方塊相對夾爪偏移，以修正抓取後搬運的末端目標
             disk_position = self.cube.get_world_poses()[0].numpy()
-            self._pickup_start_z  = float(disk_position[0, 2])
-            self._pickup_start_xy = disk_position[0, :2].copy()
             _, hand_position, _   = self.robot.get_current_state()
             self._grasp_object_offset = disk_position[0] - hand_position[0]
             # 目標位置修正：手臂需移至 (目標盤子位置 - 夾爪相對偏移)
@@ -354,20 +444,43 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
                 self._destination_disk_position - self._grasp_object_offset
             )
 
+        # 閉爪會使盤子在指間重新置中；抓取穩定度基準應取在閉爪後、抬升前。
+        if (
+            self._event == 1
+            and self._grasp_close_start_step is not None
+            and self._step
+            == self._grasp_close_start_step + max(12, int(self.events_dt[1]) // 3)
+        ):
+            disk_position = self.cube.get_world_poses()[0].numpy()
+            _, hand_position, _ = self.robot.get_current_state()
+            self._pickup_start_z = float(disk_position[0, 2])
+            self._grasp_object_offset = disk_position[0] - hand_position[0]
+
         # ── Phase 2 開始時：檢查方塊是否確實被夾起（防抓空氣）──────────────
         if self._event == 2 and self._step == 0 and self._pickup_start_z is not None:
             disk_position  = self.cube.get_world_poses()[0].numpy()
             lifted_distance = float(disk_position[0, 2]) - self._pickup_start_z
-            xy_drift        = float(np.linalg.norm(disk_position[0, :2] - self._pickup_start_xy))
-            if lifted_distance < self.grasp_lift_threshold or xy_drift > self.grasp_xy_tolerance:
+            _, hand_position, _ = self.robot.get_current_state()
+            if self._grasp_object_offset is None:
+                raise RuntimeError("Pickup pose was not recorded before the grasp check")
+            current_grasp_offset = disk_position[0] - hand_position[0]
+            relative_xy_drift = float(
+                np.linalg.norm(current_grasp_offset[:2] - self._grasp_object_offset[:2])
+            )
+            disk_index = self._moves[self._move_index][0]
+            allowed_xy_drift = max(
+                self.grasp_xy_tolerance,
+                float(self.disk_widths[disk_index]) * 1.25,
+            )
+            if lifted_distance < self.grasp_lift_threshold or relative_xy_drift > allowed_xy_drift:
                 print(
                     f"Pickup check failed: lift={lifted_distance:.3f} m, "
-                    f"horizontal drift={xy_drift:.3f} m."
+                    f"relative horizontal drift={relative_xy_drift:.3f} m "
+                    f"(limit={allowed_xy_drift:.3f} m)."
                 )
                 return self._retry_failed_pickup()
             # 以抬升後的實測物件－手部偏移換算末端目標，避免假設夾爪正好抓在盤子中心。
-            _, hand_position, _ = self.robot.get_current_state()
-            self._grasp_object_offset = disk_position[0] - hand_position[0]
+            self._grasp_object_offset = current_grasp_offset
             touchdown_offset = np.array([0.0, 0.0, -0.006])
             self.target_position = (
                 self._destination_disk_position
@@ -445,20 +558,24 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         """重置機械臂、盤子世界位姿、符號堆疊與移動／重試計數。
 
         本方法重設現有 USD/Articulation 狀態，不重新建立 Stage 幾何；適用於同一場景重跑。
+        隨機初始模式下，盤子會還原到 setup_scene() 時產生的隨機配置，而非標準 A 柱配置。
         """
         self.reset_robot()
-        self._stacks = [list(range(self.disk_count - 1, -1, -1)), [], []]
+        # 還原到初始堆疊（標準模式 = 全在 A；隨機模式 = 當次隨機配置）
+        self._stacks = [list(s) for s in self._initial_stacks]
         self._move_index = 0
         self._pickup_attempts = 0
         self._pickup_start_z = None
-        self._pickup_start_xy = None
         self._grasp_object_offset = None
         self._placement_corrections = 0
         self._placement_correction_active = False
         self._failed = False
 
-        for disk_index, disk in enumerate(self.disks):
-            disk.set_world_poses(positions=self._disk_position(disk_index, 0, self.disk_count - 1 - disk_index))
+        # 依初始堆疊還原每個盤子的世界位姿
+        for disk_index in range(self.disk_count):
+            self.disks[disk_index].set_world_poses(
+                positions=self._initial_disk_position(disk_index)
+            )
 
         if self._moves:
             self._activate_current_move()
