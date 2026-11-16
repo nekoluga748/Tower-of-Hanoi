@@ -389,11 +389,11 @@ class Franka(Articulation):
 
     def open_gripper(self) -> None:
         """將兩個夾爪 DOF 設為各 0.04 m，標稱總張開量 0.08 m。"""
-        self.set_dof_position_targets(self.gripper_open_position, dof_indices=[7, 8])
+        self.set_gripper_position(np.asarray(self.gripper_open_position, dtype=np.float32))
 
     def close_gripper(self) -> None:
         """將兩個夾爪 DOF 目標設為 0；接觸力與是否抓牢由物理模擬決定。"""
-        self.set_dof_position_targets(self.gripper_closed_position, dof_indices=[7, 8])
+        self.set_gripper_position(np.asarray(self.gripper_closed_position, dtype=np.float32))
 
     def set_gripper_position(self, position: np.ndarray) -> None:
         """精確設定夾爪兩指間距。"""

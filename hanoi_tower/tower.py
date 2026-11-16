@@ -18,7 +18,7 @@ from isaacsim.core.experimental.materials import RigidBodyMaterial
 from isaacsim.core.experimental.prims import GeomPrim, RigidPrim
 import isaacsim.core.experimental.utils.stage as stage_utils
 
-from .planner import Move, plan_hanoi, plan_hanoi_from_state, required_lift_height
+from .planner import Move, plan_hanoi, plan_hanoi_from_state
 from .pick_place import FrankaPickPlace
 
 
@@ -55,13 +55,14 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.disk_thickness = 0.025
         # 三根柱子（放置區）在世界座標系中的 (X, Y) 位置
         # 柱子間距收斂至 [-0.28, 0.0, +0.28]，遠離機械手臂全伸展奇異點
-        self.peg_positions = np.array([[0.48, -0.28], [0.48, 0.0], [0.48, 0.28]])
+        self.peg_x = 0.50   # 柱子 X（公尺）；要再往正偏就加大、往負偏就減小（原 0.48）
+        self.peg_positions = np.array([[self.peg_x, -0.28], [self.peg_x, 0.0], [self.peg_x, 0.28]])
         self.marker_size = 0.20
         self.marker_thickness = 0.001
         self.marker_colors = ["cyan", "gold", "limegreen"]
 
         # 盤寬差保持明顯；三盤時寬度為 3.2、4.4、5.6 cm。
-        width_span = min(0.032, 0.012 * (disk_count - 1))
+        width_span = min(0.024, 0.012 * (disk_count - 1))
         self.disk_widths = np.linspace(0.056 - width_span, 0.056, disk_count)
 
         # 12 色高對比飽和調色盤（每層色彩分明，視覺效果優異）
@@ -81,19 +82,18 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         ]
 
         # 各階段運動參數配置
-        self.pregrasp_height = 0.20          # 移動至上方時的初始離地高度
-        self.approach_height = 0.0885        # 盤面頂部至手掌目標；比原目標低 5 mm 以增加指尖咬合
+        self.approach_height = 0.0885       # 盤面頂部至手掌目標，避免手指跨入下層盤
         self._default_approach_height = self.approach_height
-        self.lift_height = 0.14              # 抓起後的提升高度
         self.retreat_height = 0.16           # 放置完畢後的垂直退避高度
-        self.carry_reserve = 0.08            # 水平巡航時高於最高塔的安全裕度（放大至 8cm 防撞）
+        self.carry_reserve = 0.12            # 盤底高於最高堆疊的水平搬運淨空 (m)
         self.grasp_lift_threshold = 0.035    # 判定抓取成功的垂直提升閾值
         self.grasp_xy_tolerance = 0.018      # 抓取提升過程允許的水平滑移容許值（精度細化至原本 2 倍）
-        self.carry_tracking_tolerance = 0.035 # 水平搬運過程方塊相對夾爪的滑移容許值
-        self.placement_tolerance = 0.038     # 最終放置誤差容許值（精度細化至原本 2 倍）
-        self.pickup_probe_step = 0.005       # 抓取失敗時最多單次向下探 5 mm
-        self.minimum_hand_target_z = 0.11    # 手掌目標離地至少 11 cm，保留夾爪與地面淨空
+        self.placement_tolerance = 0.008     # 放置誤差容許值（原 38mm 比盤厚還大，半空也會通過）
+        self.max_placement_corrections = 4   # 重降修正次數上限（容許值收緊後多給一次機會）
+        self.pickup_probe_step = 0.005       # 抓取失敗時最多向下探 5 mm
+        self.minimum_hand_target_z = 0.10    # 手掌目標離地至少 10 cm，保留夾爪與地面淨空
         self.max_pickup_attempts = 2         # 初次抓取加一次受限下探
+        self.double_grasp_tolerance = 0.005  # 下層支撐盤上升超過 5 mm 視為雙抓
 
         # 實體剛體與狀態變數
         self.disks: list[RigidPrim] = []
@@ -107,6 +107,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._pickup_start_z: float | None = None
         self._grasp_object_offset: np.ndarray | None = None
         self._destination_disk_position: np.ndarray | None = None
+        self._support_disk_index: int | None = None
+        self._support_disk_start_z: float | None = None
         self._placement_corrections = 0
         self._placement_correction_active = False
         self._failed = False
@@ -293,40 +295,28 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
     def _safe_transit_z(self) -> float:
         """依目前最高符號堆疊估算水平搬運與撤離時的末端巡航安全 Z 高度。
 
-        估算式以最高堆疊頂面、抓取安全間距及 8cm 安全裕度相加，並將最大允許
-        高度上限放大至 0.46m，確保高層數搬運與退避撤離時絕對不碰撞任何柱子上的方塊。
+        地面碰撞面位於 z=0，因此最高堆疊頂面為層數乘以盤厚。
+        再加盤厚、夾爪至盤面的間距及 carry_reserve，確保盤底保有指定淨空；結果
+        限制在 0.34–0.52 m 的可用工作高度範圍內。
         """
         tallest_stack = max(len(stack) for stack in self._stacks)
         tallest_stack_top = tallest_stack * self.disk_thickness
-        margin = 0.08  # 放大防撞裕度至 8cm
-        computed = tallest_stack_top + self.approach_height + margin
-        return float(np.clip(computed, 0.28, 0.46))
+        computed = (
+            tallest_stack_top
+            + self.disk_thickness
+            + self.approach_height
+            + self.carry_reserve
+        )
+        return float(np.clip(computed, 0.34, 0.52))
 
     def _activate_current_move(self) -> None:
         """把目前符號移動轉成基礎 Pick-and-Place 控制器的物件與目標位姿。
 
         X/Y 目標固定在目的柱中心，以抑制堆疊誤差累積；若目的柱已有盤子，Z 目標
-        取其最上層剛體的實測中心加一個盤厚。lift_height 則由最高符號堆疊與
-        required_lift_height() 計算，並再檢查是否至少能到達安全走廊。
+        取其最上層剛體的實測中心加一個盤厚；水平搬運高度由 _safe_transit_z() 統一計算。
         """
-        disk_index, source, destination = self._moves[self._move_index]
-        source_level = len(self._stacks[source]) - 1
+        disk_index, _, destination = self._moves[self._move_index]
         destination_level = len(self._stacks[destination])
-        source_center_z = (source_level + 0.5) * self.disk_thickness
-        tallest_stack = max(len(stack) for stack in self._stacks)
-
-        # 計算越過最高塔所需的垂直提升高度，並確保安全淨空
-        self.lift_height = required_lift_height(
-            current_disk_center_z=source_center_z,
-            stack_layers=tallest_stack,
-            block_height=self.disk_thickness,
-            reserve=self.carry_reserve,
-            minimum=0.14,
-        )
-        safe_z = self._safe_transit_z()
-        min_lift_for_safe = safe_z - source_center_z
-        if self.lift_height < min_lift_for_safe:
-            self.lift_height = min_lift_for_safe
 
         self.cube = self.disks[disk_index]
         peg_x, peg_y = self.peg_positions[destination]
@@ -349,11 +339,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._grasp_object_offset = None
         self._placement_corrections = 0
         self._placement_correction_active = False
+        self._support_disk_index = None
+        self._support_disk_start_z = None
 
     def _retry_failed_pickup(self) -> bool:
         """未確認盤子被抬起時，回到安全高度並進行一次受限下探。
 
-        抬升不足或水平漂移超過閾值時呼叫。最多向下探 pickup_probe_step，且
+        抬升不足或水平漂移超過閾值時呼叫。最多向下探一次 pickup_probe_step，且
         手掌世界 Z 目標不得低於 minimum_hand_target_z；若沒有安全空間或探測仍失敗，
         設定 _failed 停止後續移動。
         回傳值表示是否允許繼續任務。
@@ -390,6 +382,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self._event = 0
         self._step = 0
         self._phase_start_position = None
+        self._support_disk_index = None
+        self._support_disk_start_z = None
         self._pickup_start_z = None
         self._grasp_object_offset = None
         print(
@@ -397,6 +391,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             f"{probe_distance:.3f} m once with {self.approach_height:.3f} m clearance above the disk."
         )
         return True
+
+    @staticmethod
+    def _hand_target_for_disk(disk_target: np.ndarray, disk_hand_offset: np.ndarray) -> np.ndarray:
+        return disk_target - disk_hand_offset
+
+    def _support_disk_was_lifted(self, lift_distance: float) -> bool:
+        return lift_distance > self.double_grasp_tolerance
 
     def forward(self, ik_method: str = "damped-least-squares") -> bool:
         """執行一影格 Hanoi 任務控制，將符號移動和物理抓放串接。
@@ -408,12 +409,38 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         """
         if self._failed or self._move_index >= len(self._moves):
             return False
+        if self._motion_failed:
+            self._failed = True
+            print("Hanoi stopped: arm did not reach a required pose before timeout.")
+            return False
+
+        if self._event == 1 and self._step == 0 and self._support_disk_index is None:
+            _, source, _ = self._moves[self._move_index]
+            if len(self._stacks[source]) > 1:
+                self._support_disk_index = self._stacks[source][-2]
+                support_position = self.disks[self._support_disk_index].get_world_poses()[0].numpy()[0]
+                self._support_disk_start_z = float(support_position[2])
 
         # ── 偵測一次完整 Pick-Place (Phase 0~4) 是否執行完畢 ─────────────────
         if super().is_done():
             if self._destination_disk_position is None:
                 self._failed = True
                 print("Hanoi stopped: destination pose was not initialized.")
+                return False
+
+            disk_position = self.cube.get_world_poses()[0].numpy()[0]
+            settled_error = float(
+                np.linalg.norm(self._destination_disk_position - disk_position)
+            )
+            if settled_error > self.placement_tolerance:
+                self._failed = True
+                gripper_positions = self.robot.get_dof_positions().numpy()[0, 7:9]
+                print(
+                    f"Hanoi stopped after release: disk settled {settled_error:.3f} m "
+                    f"off target; target={self._destination_disk_position.tolist()}, "
+                    f"disk={disk_position.tolist()}, finger positions={gripper_positions.tolist()}; "
+                    "move was not committed."
+                )
                 return False
 
             # 只在完整抓放 FSM 結束後提交符號移動；前面的階段不提前改寫柱位狀態。
@@ -435,7 +462,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             self._activate_current_move()
 
         # 在 Phase 1 下潛段轉入底部等待時記錄盤子與手部相對位姿，用於修正末端目標。
-        seg = max(self._scale_steps(3), int(self.events_dt[1])) // 3
+        seg = max(self.grasp_descent_steps, int(self.events_dt[1]) // 3)
         if self._event == 1 and self._step == seg:
             # 記錄方塊相對夾爪偏移，以修正抓取後搬運的末端目標
             disk_position = self.cube.get_world_poses()[0].numpy()
@@ -452,7 +479,7 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             and self._grasp_close_start_step is not None
             and self._step
             == self._grasp_close_start_step
-            + max(self._scale_steps(12), int(self.events_dt[1]) // 3)
+            + max(self._scale_steps(12), self.grasp_close_steps)
         ):
             disk_position = self.cube.get_world_poses()[0].numpy()
             _, hand_position, _ = self.robot.get_current_state()
@@ -461,6 +488,17 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         # ── Phase 2 開始時：檢查方塊是否確實被夾起（防抓空氣）──────────────
         if self._event == 2 and self._step == 0 and self._pickup_start_z is not None:
+            if self._support_disk_index is not None and self._support_disk_start_z is not None:
+                support_position = self.disks[self._support_disk_index].get_world_poses()[0].numpy()[0]
+                support_lift = float(support_position[2]) - self._support_disk_start_z
+                if self._support_disk_was_lifted(support_lift):
+                    self._failed = True
+                    print(
+                        f"Double grasp detected: supporting disk D{self._support_disk_index + 1} "
+                        f"lifted {support_lift:.3f} m; stopping before carry."
+                    )
+                    return False
+
             disk_position  = self.cube.get_world_poses()[0].numpy()
             lifted_distance = float(disk_position[0, 2]) - self._pickup_start_z
             _, hand_position, _ = self.robot.get_current_state()
@@ -484,11 +522,9 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
                 return self._retry_failed_pickup()
             # 以抬升後的實測物件－手部偏移換算末端目標，避免假設夾爪正好抓在盤子中心。
             self._grasp_object_offset = current_grasp_offset
-            touchdown_offset = np.array([0.0, 0.0, -0.006])
-            self.target_position = (
-                self._destination_disk_position
-                - self._grasp_object_offset
-                + touchdown_offset
+            self.target_position = self._hand_target_for_disk(
+                self._destination_disk_position,
+                self._grasp_object_offset,
             )
             self._pickup_start_z = None
 
@@ -512,12 +548,9 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             disk_position = self.cube.get_world_poses()[0].numpy()[0]
             _, hand_position, _ = self.robot.get_current_state()
             self._grasp_object_offset = disk_position - hand_position[0]
-            # -6mm 貼地微壓：抵消 PD 控制器重力下垂穩態誤差，確保方塊緊貼面才開爪
-            touchdown_offset = np.array([0.0, 0.0, -0.006])
-            self.target_position = (
-                self._destination_disk_position
-                - self._grasp_object_offset
-                + touchdown_offset
+            self.target_position = self._hand_target_for_disk(
+                self._destination_disk_position,
+                self._grasp_object_offset,
             )
 
         # ── Phase 4 開始時：閉迴路檢查對準精度（若偏移過大則重降一次修正）──
@@ -526,36 +559,44 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             placement_delta = self._destination_disk_position - disk_position
             placement_error = float(np.linalg.norm(placement_delta))
             if placement_error > self.placement_tolerance:
-                if self._placement_corrections >= 2:
+                if self._placement_corrections >= self.max_placement_corrections:
                     self._failed = True
                     print(
                         f"Hanoi stopped before release: disk remains "
-                        f"{placement_error:.3f} m off target after two corrections."
+                        f"{placement_error:.3f} m off target after {self.max_placement_corrections} corrections."
                     )
                     return False
                 # 退回 Phase 3 重新對準
                 _, hand_position, _ = self.robot.get_current_state()
-                self.target_position = hand_position[0] + placement_delta
+                self.target_position = (
+                    hand_position[0]
+                    + placement_delta
+                )
                 self._placement_corrections += 1
                 self._event = 3
                 self._step  = 0
                 self._phase_start_position = None
                 self._placement_correction_active = True
                 print(
-                    f"Placement correction {self._placement_corrections}/2: "
-                    f"error={placement_error:.3f} m; retrying descent."
+                    f"Placement correction {self._placement_corrections}/{self.max_placement_corrections}: "
+                    f"error=({placement_delta[0]:.3f}, {placement_delta[1]:.3f}, "
+                    f"{placement_delta[2]:.3f}) m; retrying descent."
                 )
                 return True
             self._placement_correction_active = False
 
         # ── 執行基礎 FSM 一步進 ───────────────────────────────────────────────
         step_executed = super().forward(ik_method)
+        if self._motion_failed:
+            self._failed = True
+            print("Hanoi stopped: arm did not reach a required pose before timeout.")
+            return False
 
         return step_executed
 
     def is_done(self) -> bool:
         """回傳任務是否已到終態：所有移動完成，或失敗旗標已設定。"""
-        return self._failed or self._move_index >= len(self._moves)
+        return self._failed or self._motion_failed or self._move_index >= len(self._moves)
 
     def reset(self) -> None:
         """重置機械臂、盤子世界位姿、符號堆疊與移動／重試計數。

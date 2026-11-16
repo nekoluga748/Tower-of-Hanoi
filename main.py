@@ -40,6 +40,12 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--headless", action="store_true", help="無圖形介面背景執行模式（適合伺服器/自動化測試）")
 parser.add_argument("--test", action="store_true", help="相容舊用法；任務結束後皆會自動退出")
 parser.add_argument("--disks", type=int, choices=range(2, 11), default=3, help="河內塔層數（支援 2 至 10 層，最大 1023 步）")
+parser.add_argument(
+    "--stop-after-moves",
+    type=int,
+    default=None,
+    help="完成指定步數後正常停止（用於驗證部分 Hanoi 動作）",
+)
 parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="物理模擬計算後端 (cpu 或 cuda)")
 parser.add_argument("--random-init", action="store_true", help="隨機打散初始堆疊（盤子不一定全在 A 柱）")
 parser.add_argument("--seed", type=int, default=None, help="隨機種子，指定後每次執行產生相同的隨機初始配置")
@@ -83,6 +89,8 @@ args, _ = parser.parse_known_args()
 
 if args.record_fps < 1:
     parser.error("--record-fps 必須至少為 1")
+if args.stop_after_moves is not None and args.stop_after_moves < 1:
+    parser.error("--stop-after-moves 必須至少為 1")
 
 # 預設行為：若使用者未特別指定 --record，自動於 recordings/ 目錄建立帶有時間戳記的 MP4 錄影
 if args.record is None:
@@ -414,7 +422,11 @@ try:
             )
             logged_move_count += 1
 
-        if controller.is_done() and not completed:
+        stop_after_moves_reached = (
+            args.stop_after_moves is not None
+            and controller._move_index >= args.stop_after_moves
+        )
+        if (controller.is_done() or stop_after_moves_reached) and not completed:
             completed = True
             completion_time = time.monotonic()
             moves_table = pd.DataFrame(completed_moves, columns=["Step", "Disk", "Move"])
@@ -423,6 +435,11 @@ try:
             print(f"移動表已保存：{table_path}", flush=True)
             if controller._failed:
                 print(f"任務中止，已完成 {len(completed_moves)} 步。", flush=True)
+            elif stop_after_moves_reached and not controller.is_done():
+                print(
+                    f"診斷停止，已完成 {len(completed_moves)}/{len(controller._moves)} 步。",
+                    flush=True,
+                )
             else:
                 print(f"河內塔完成，共移動 {len(completed_moves)} 步。", flush=True)
 
@@ -444,7 +461,12 @@ try:
         # NVIDIA 感測器提供 RGB；OpenCV 轉成 BGR 後寫入 MP4，這裡不疊加文字或檔名。
         if recording_enabled and simulation_app.is_running():
             rgba = sensors.get_rgb(viewport)
-            if rgba.ndim == 3 and rgba.shape[2] >= 3:
+            if (
+                rgba.ndim == 3
+                and rgba.shape[2] >= 3
+                and rgba.shape[0] > 0
+                and rgba.shape[1] > 0
+            ):
                 height, width = rgba.shape[:2]
                 if video_writer is None:
                     codec = cv2.VideoWriter_fourcc(*"mp4v")
