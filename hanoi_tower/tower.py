@@ -577,11 +577,11 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
                 self._step  = 0
                 self._phase_start_position = None
                 self._placement_correction_active = True
-                print(
-                    f"Placement correction {self._placement_corrections}/{self.max_placement_corrections}: "
-                    f"error=({placement_delta[0]:.3f}, {placement_delta[1]:.3f}, "
-                    f"{placement_delta[2]:.3f}) m; retrying descent."
-                )
+                # print(
+                #     f"Placement correction {self._placement_corrections}/{self.max_placement_corrections}: "
+                #     f"error=({placement_delta[0]:.3f}, {placement_delta[1]:.3f}, "
+                #     f"{placement_delta[2]:.3f}) m; retrying descent."
+                # )
                 return True
             self._placement_correction_active = False
 

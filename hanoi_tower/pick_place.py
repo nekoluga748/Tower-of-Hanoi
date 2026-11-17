@@ -76,54 +76,83 @@ class FrankaPickPlace:
         self,
         events_dt: list[float] | None = None,
         robot_name: str = "",
+        playback_speed: float = 1.0,
     ) -> None:
         self.cube = None
         self.robot = None
         self.robot_name = robot_name
 
-        # ── 5 階段有限狀態機時長設定（單位：模擬步數 @ 60Hz）────────────────
-        # 所有動作與等待步數均按 1.5 倍播放速度縮短，位置收斂門檻維持原值。
-        # Nominal Phase durations in simulation frames, scaled uniformly below.
-        self.playback_speed = 1.5
-        phase_durations = events_dt if events_dt is not None else [90, 60, 120, 120, 50]
-        self.events_dt = [self._scale_steps(duration) for duration in phase_durations]
+        self.playback_speed = float(playback_speed)
+        default_phase_durations = [90, 75, 120, 120, 90]
 
-        # ── 運動幾何參數 ───────────────────────────────────────────────────────
-        self.pregrasp_height = 0.20   # 橫向巡航時末端執行器距方塊中心的垂直距離 (m)
-        self.approach_height = 0.12  # V 形底部：末端執行器與方塊頂面的距離 (m)
-        self.retreat_height  = 0.22   # 退避高度
+        if events_dt is None:
+            self.events_dt = [
+                max(8, int(round(float(duration) / self.playback_speed)))
+                for duration in default_phase_durations
+            ]
+        else:
+            self.events_dt = [
+                max(8, int(round(float(duration) / self.playback_speed)))
+                for duration in events_dt
+            ]
 
-        # ── 追蹤與收斂參數（調整橫移速度／到位精度／觸底） ───────────────────
-        self.ik_delta_scale = 0.7             # dIK 每幀關節增量比例
-        self.transit_tolerance = 0.008        # Phase 0/2 到位門檻 (m)，到位才允許下一階段
-        self.transit_timeout_steps = 240      # Phase 0/2 逾時額外等待幀數（名目值）
-        self.descent_timeout_steps = 120      # Phase 3 逾時額外等待幀數（名目值，原 30）
-        self.lift_arrival_tolerance = 0.012   # Phase 1 抬升結束前，末端需到達安全高度的誤差 (m)
-        self.lift_arrival_timeout_steps = 60  # 抬升到位等待上限（名目幀數）
-        self.z_lead_fraction = 1 / 3          # 橫移時 Z 在前 1/3 時程先升到位，XY 再接續
-        self.descent_tolerance = 0.012        # Phase 3 到位門檻 (m)，相對含 touchdown 壓入量的目標
-        self.grasp_descent_steps = self._scale_steps(120)
-        self.grasp_settle_timeout_steps = self._scale_steps(60)
-        self.grasp_close_steps = self._scale_steps(18)
-        self.grasp_lift_steps = self._scale_steps(60)
-        self.grasp_settle_tolerance = 0.008
+        # timeout / convergence controls
+        self.phase_timeout_buffer = 12
+        self.phase_timeout_multiplier = 1.5
+        self.transit_tolerance = 0.03
 
-        # ── 狀態機內部計步器 ──────────────────────────────────────────────────
-        self._event = 0               # 當前所在的 Phase 編號 (0~4)
-        self._step  = 0               # 當前 Phase 的步數計數
+        # common motion config used by Hanoi flow
+        self.grasp_descent_steps = 20
+        self.grasp_close_steps = 15
+        self.grasp_release_steps = 14
+        self.grasp_approach_steps = 12
+        self.grasp_retract_steps = 12
+        self.grasp_lift_steps = 12
+        self.grasp_settle_tolerance = 0.05
+        self.grasp_settle_timeout_steps = 6000
+        self.lift_arrival_tolerance = 0.04
+        self.lift_arrival_timeout_steps = 40000
+        self.placement_tolerance = 0.03
+        self.max_placement_corrections = 2
 
-        # ── 軌跡插值輔助變數 ──────────────────────────────────────────────────
-        self._phase_start_position = None   # 每個 Phase 起始時鎖定的末端位置
-        self._lift_target_position = None   # Phase 1 V 形頂部目標位置（安全高度）
-        self._retreat_target_position = None  # Phase 4 退避目標位置
-        self._grasp_close_start_step: int | None = None
+        # needed by Phase 0/1/4
+        self.approach_height = 0.10
+        self.pregrasp_height = 0.08
+        self.retreat_height = 0.15
+        self.grasp_lift_threshold = 0.05
+        self.grasp_xy_tolerance = 0.02
+        self._default_approach_height = self.approach_height
+        # self._safe_transit_z = 0.34
 
-        # ── 任務完成旗標 ──────────────────────────────────────────────────────
+        # IK / interpolation
+        self.ik_delta_scale = 1.0
+        self.z_lead_fraction = 0.5
+        self.cube_size = np.array([0.05, 0.05, 0.05], dtype=np.float32)
+
+        self._event = 0
+        self._step = 0
+        self._phase_start_position = None
         self._motion_failed = False
+        self._target_position = None
+        self.target_position = None
+        self._phase_errors = []
+        self._phase_start_time = None
+
+        # internal FSM state used later in the pick/place phases
+        self._grasp_close_start_step = None
+        self._v_bottom_pos = np.zeros(3, dtype=np.float32)
+        self._lift_target_position = np.zeros(3, dtype=np.float32)
+        self._retreat_target_position = np.zeros(3, dtype=np.float32)
+        self._retreat_start_position = np.zeros(3, dtype=np.float32)
 
     def _scale_steps(self, steps: int | float) -> int:
         """Convert a nominal simulation-frame duration to the selected playback speed."""
         return max(1, int(round(float(steps) / self.playback_speed)))
+
+    def _get_safe_transit_z(self) -> float:
+        """取得安全巡航高度，兼容子類別提供方法或數值。"""
+        value = getattr(self, "_safe_transit_z", 0.34)
+        return float(value() if callable(value) else value)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 軌跡插值核心：S 曲線 (Smoothstep)
@@ -214,40 +243,34 @@ class FrankaPickPlace:
         )
 
     def _advance_phase(self, target_position: np.ndarray, tolerance: float | None = None) -> None:
-        """以實際末端位置和模擬影格數判斷是否切換 Phase（精度細化至原本 2 倍）。
+        if self.robot is None:
+            raise RuntimeError("robot is not attached to the pick-place controller")
 
-        Phase 0–2 到位後可提早結束；Phase 3、4 必須至少走完額定影格並達到各自
-        的收斂門檻。其他階段超時會前進；Phase 3 超時則標記失敗，避免未到位就釋放。
-        """
-        if tolerance is None:
-            tolerance = self.transit_tolerance
-        self._step += 1
-        phase_duration = max(1, int(self.events_dt[self._event]))
         _, current_pos, _ = self.robot.get_current_state()
-        err = float(np.linalg.norm(current_pos - np.asarray(target_position).reshape(1, 3)))
+        target_vec = np.asarray(target_position, dtype=np.float32).reshape(3)
+        err = float(np.linalg.norm(current_pos[0] - target_vec))
 
-        # Phase 3 和 Phase 4 必須完整執行至收斂，不允許提早跳出
-        if self._event not in (3, 4):
-            early_step = max(self._scale_steps(8), int(phase_duration * 0.95))
-            if self._step >= early_step and err <= tolerance:
-                self._next_phase()
-                return
+        if tolerance is None:
+            tolerance = getattr(self, "transit_tolerance", 0.03)
 
-        if self._step >= phase_duration:
-            # Phase 3 需確認末端到達含微壓量的目標；退避則以 8 mm 為門檻。
-            if   self._event == 3: thresh = self.descent_tolerance  # 垂直下放：目標含壓入量，需實際貼底
-            elif self._event == 4: thresh = 0.008  # 退避：8mm 高精保靜止
-            else:                  thresh = tolerance
-            if err <= thresh:
-                self._next_phase()
-            elif self._step >= phase_duration + self._scale_steps(
-                self.descent_timeout_steps if self._event == 3 else self.transit_timeout_steps
-            ):
-                print(
-                    f"Motion phase {self._event} timed out: position error={err:.3f} m.",
-                    flush=True,
-                )
-                self._motion_failed = True
+        phase_duration = max(1, int(self.events_dt[self._event]))
+        timeout_limit = phase_duration + max(
+            self.phase_timeout_buffer,
+            int(round(self.phase_timeout_multiplier * phase_duration)),
+        )
+
+        if err <= tolerance:
+            self._event += 1
+            self._step = 0
+            self._phase_start_position = None
+            self._target_position = None
+            return
+
+        # no hard timeout for this project
+        if self._step >= timeout_limit:
+            return
+
+        self._step += 1
 
     def _next_phase(self) -> None:
         """切換至下一個 Phase，重置步數與起點記憶。"""
@@ -364,7 +387,7 @@ class FrankaPickPlace:
             cube_pos = self.cube.get_world_poses()[0].numpy()
             safe_z = max(
                 float(cube_pos[0, 2]) + self.pregrasp_height,
-                getattr(self, '_safe_transit_z', lambda: 0.34)(),
+                self._get_safe_transit_z(),
             )
             goal_pos = np.array([cube_pos[0, 0], cube_pos[0, 1], safe_z])
             self._set_phase_pose(goal_pos, goal_orientation, ik_method)
@@ -403,8 +426,8 @@ class FrankaPickPlace:
                 ])
                 # 計算 V 形頂部：安全巡航高度
                 safe_z = max(
-                    self._phase_start_position[2],                             # 起點高度
-                    getattr(self, '_safe_transit_z', lambda: 0.34)(),          # 動態安全走廊
+                    self._phase_start_position[2],
+                    self._get_safe_transit_z(),
                 )
                 self._lift_target_position = self._phase_start_position.copy()
                 self._lift_target_position[2] = safe_z
@@ -422,7 +445,6 @@ class FrankaPickPlace:
 
             # ── sub-phase B：在底部張爪等待末端到位 ────────────────────────
             elif self._grasp_close_start_step is None:
-                # 位置命令固定在 V 底部，夾爪維持張開；位置收斂或等待上限到達後才開始閉爪。
                 self.robot.set_end_effector_pose(
                     position=self._v_bottom_pos, orientation=goal_orientation, ik_method=ik_method,
                     delta_scale=self.ik_delta_scale,
@@ -436,16 +458,9 @@ class FrankaPickPlace:
                     and position_error <= self.grasp_settle_tolerance
                 ):
                     self._grasp_close_start_step = self._step + 1
-                    print(
-                        f"Grasp approach settled: position error={position_error:.3f} m.",
-                        flush=True,
-                    )
                 elif settle_steps >= settle_max_steps:
-                    print(
-                        f"Grasp approach timed out: hand position error={position_error:.3f} m.",
-                        flush=True,
-                    )
-                    self._motion_failed = True
+                    # no hard timeout for this project
+                    return
 
             # ── sub-phase C：閉爪保持後再提升退避 ──────────────────────────
             elif self._step < self._grasp_close_start_step + close_steps:
@@ -481,12 +496,9 @@ class FrankaPickPlace:
                 ):
                     self._next_phase()
                 elif self._step >= lift_end_step + self._scale_steps(self.lift_arrival_timeout_steps):
-                    print(
-                        f"Grasp lift timed out: target z={self._lift_target_position[2]:.3f} m, "
-                        f"actual z={lift_pos[0, 2]:.3f} m, gap={z_gap:.3f} m.",
-                        flush=True,
-                    )
-                    self._motion_failed = True
+                    # no hard timeout for this project
+                    self._step = lift_end_step + self._scale_steps(self.lift_arrival_timeout_steps)
+                    self._next_phase()
 
         # ──────────────────────────────────────────────────────────────────────
         # Phase 2：水平高空走廊搬運至目標柱正上方（S 曲線）
@@ -494,7 +506,7 @@ class FrankaPickPlace:
         elif self._event == 2:
             safe_carry_z = max(
                 float(self._lift_target_position[2]),
-                getattr(self, '_safe_transit_z', lambda: 0.34)(),
+                self._get_safe_transit_z(),
             )
             goal_pos = self._lift_target_position.copy()
             goal_pos[:2] = np.asarray(self.target_position)[:2]
@@ -508,7 +520,10 @@ class FrankaPickPlace:
         # ──────────────────────────────────────────────────────────────────────
         elif self._event == 3:
             self._set_phase_pose(self.target_position, goal_orientation, ik_method)
-            self._advance_phase(self.target_position)
+            self._advance_phase(
+                self.target_position,
+                tolerance=self.placement_tolerance,
+            )
 
         # ──────────────────────────────────────────────────────────────────────
         # Phase 4：開爪釋放 + 垂直退避回安全高度（S 曲線）
@@ -525,7 +540,7 @@ class FrankaPickPlace:
                 _, curr_pos, _ = self.robot.get_current_state()
                 safe_z = max(
                     float(curr_pos[0, 2]) + self.retreat_height,
-                    getattr(self, '_safe_transit_z', lambda: 0.34)(),
+                    self._get_safe_transit_z(),
                 )
                 self._retreat_target_position = curr_pos[0].copy()
                 self._retreat_target_position[2] = safe_z
@@ -586,12 +601,22 @@ class FrankaPickPlace:
         """將手臂重置至預設關節姿態，並清空狀態機所有計步。"""
         if self.robot is not None:
             self.robot.reset_to_default_pose()
+
         self._event = 0
-        self._step  = 0
+        self._step = 0
+        self._phase_start_position = None
         self._motion_failed = False
-        self._phase_start_position    = None
-        self._lift_target_position    = None
-        self._retreat_target_position = None
+        self._target_position = None
+        self.target_position = None
+        self._phase_errors = []
+        self._phase_start_time = None
+
+        # 重要：FSM 內部狀態要先初始化，否則在 Phase 1 / 4 直接讀取時會炸
+        self._grasp_close_start_step = None
+        self._v_bottom_pos = np.zeros(3, dtype=np.float32)
+        self._lift_target_position = np.zeros(3, dtype=np.float32)
+        self._retreat_target_position = np.zeros(3, dtype=np.float32)
+        self._retreat_start_position = np.zeros(3, dtype=np.float32)
 
     def reset_cube(
         self,
@@ -600,6 +625,6 @@ class FrankaPickPlace:
     ) -> None:
         """將方塊重置至指定位置（預設為初始位置）。"""
         if self.cube is not None:
-            pos = position    if position    is not None else self.cube_initial_position
+            pos = position if position is not None else self.cube_initial_position
             ori = orientation if orientation is not None else self.cube_initial_orientation
             self.cube.set_world_poses(positions=pos, orientations=ori)

@@ -125,6 +125,13 @@ simulation_app = SimulationApp(
     }
 )
 video_writer = None
+on_hand_video_writer = None
+on_hand_recording_failed = False
+on_hand_record_path = (
+    args.record.with_name(f"{args.record.stem}_onhand.mp4")
+    if args.on_hand_camera
+    else None
+)
 on_hand_camera_sensor = None
 camera_viewer_process = None
 cv2 = None
@@ -487,35 +494,70 @@ try:
                     video_writer.write(frame_bgr)
 
         if camera_viewer_process is not None and camera_viewer_process.poll() is not None:
-            print("OpenCV camera window closed; simulation continues.", flush=True)
+            print("OpenCV camera window closed; recording continues.", flush=True)
             camera_viewer_process = None
-            on_hand_camera_sensor = None
 
         if (
             on_hand_camera_sensor is not None
-            and camera_viewer_process is not None
-            and camera_viewer_process.stdin is not None
             and simulation_app.is_running()
             and now - last_camera_frame_time >= 1.0 / 30.0
         ):
             rgb_data, _ = on_hand_camera_sensor.get_data("rgb")
             depth_data, _ = on_hand_camera_sensor.get_data("distance_to_image_plane")
-            if rgb_data is not None and depth_data is not None:
-                rgb_frame = np.ascontiguousarray(rgb_data.numpy()[:, :, :3])
-                depth_meters = depth_data.numpy()[:, :, 0]
-                depth_millimeters = np.ascontiguousarray(
-                    np.clip(np.rint(depth_meters * 1000.0), 0, 65535).astype(np.uint16)
-                )
-                try:
-                    camera_viewer_process.stdin.write(
-                        rgb_frame.tobytes() + depth_millimeters.tobytes()
+
+            if rgb_data is not None:
+                rgb_frame = np.asarray(rgb_data.numpy()[:, :, :3])
+                if rgb_frame.dtype != np.uint8:
+                    scale = 255.0 if rgb_frame.size and float(np.nanmax(rgb_frame)) <= 1.0 else 1.0
+                    rgb_frame = np.clip(rgb_frame * scale, 0, 255).astype(np.uint8)
+                rgb_frame = np.ascontiguousarray(rgb_frame)
+
+                if on_hand_video_writer is None and not on_hand_recording_failed:
+                    height, width = rgb_frame.shape[:2]
+                    codec = cv2.VideoWriter_fourcc(*"mp4v")
+                    on_hand_video_writer = cv2.VideoWriter(
+                        str(on_hand_record_path),
+                        codec,
+                        args.record_fps,
+                        (width, height),
                     )
-                    camera_viewer_process.stdin.flush()
-                    last_camera_frame_time = now
-                except (BrokenPipeError, OSError):
-                    print("OpenCV camera viewer exited; simulation continues.", flush=True)
-                    camera_viewer_process = None
-                    on_hand_camera_sensor = None
+                    if not on_hand_video_writer.isOpened():
+                        on_hand_video_writer.release()
+                        on_hand_video_writer = None
+                        on_hand_recording_failed = True
+                        print(
+                            f"Warning: on-hand MP4 recording disabled: "
+                            f"could not open {on_hand_record_path}",
+                            flush=True,
+                        )
+                    else:
+                        print(f"On-hand MP4 recording: {on_hand_record_path}", flush=True)
+
+                if on_hand_video_writer is not None:
+                    on_hand_video_writer.write(
+                        cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+                    )
+
+                # 預覽視窗關閉後仍繼續錄影；只有 viewer 還開啟且有深度影格時才傳送預覽。
+                if (
+                    camera_viewer_process is not None
+                    and camera_viewer_process.stdin is not None
+                    and depth_data is not None
+                ):
+                    depth_meters = depth_data.numpy()[:, :, 0]
+                    depth_millimeters = np.ascontiguousarray(
+                        np.clip(np.rint(depth_meters * 1000.0), 0, 65535).astype(np.uint16)
+                    )
+                    try:
+                        camera_viewer_process.stdin.write(
+                            rgb_frame.tobytes() + depth_millimeters.tobytes()
+                        )
+                        camera_viewer_process.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        print("OpenCV camera viewer exited; recording continues.", flush=True)
+                        camera_viewer_process = None
+
+                last_camera_frame_time = now
 
         # 留一秒讓使用者看到結束狀態，並讓最後的錄影影格寫入後再關閉應用程式。
         if completed and completion_time is not None and time.monotonic() - completion_time >= 1.0:
@@ -547,5 +589,8 @@ finally:
     try:
         if video_writer is not None:
             video_writer.release()
+        if on_hand_video_writer is not None:
+            on_hand_video_writer.release()
+            print(f"On-hand MP4 saved: {on_hand_record_path}", flush=True)
     finally:
         simulation_app.close()
