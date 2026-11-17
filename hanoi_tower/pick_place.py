@@ -76,14 +76,14 @@ class FrankaPickPlace:
         self,
         events_dt: list[float] | None = None,
         robot_name: str = "",
-        playback_speed: float = 1.0,
+        playback_speed: float = 1.25,
     ) -> None:
         self.cube = None
         self.robot = None
         self.robot_name = robot_name
 
         self.playback_speed = float(playback_speed)
-        default_phase_durations = [90, 75, 120, 120, 90]
+        default_phase_durations = [75, 75, 90, 120, 75]
 
         if events_dt is None:
             self.events_dt = [
@@ -108,11 +108,11 @@ class FrankaPickPlace:
         self.grasp_approach_steps = 12
         self.grasp_retract_steps = 12
         self.grasp_lift_steps = 12
-        self.grasp_settle_tolerance = 0.05
+        self.grasp_settle_tolerance = 0.03
         self.grasp_settle_timeout_steps = 6000
         self.lift_arrival_tolerance = 0.04
         self.lift_arrival_timeout_steps = 40000
-        self.placement_tolerance = 0.03
+        self.placement_tolerance = 0.08
         self.max_placement_corrections = 2
 
         # needed by Phase 0/1/4
@@ -144,6 +144,8 @@ class FrankaPickPlace:
         self._lift_target_position = np.zeros(3, dtype=np.float32)
         self._retreat_target_position = np.zeros(3, dtype=np.float32)
         self._retreat_start_position = np.zeros(3, dtype=np.float32)
+
+        self.placement_xy_align_fraction = 0.50
 
     def _scale_steps(self, steps: int | float) -> int:
         """Convert a nominal simulation-frame duration to the selected playback speed."""
@@ -209,7 +211,10 @@ class FrankaPickPlace:
             self._phase_start_position = curr_pos[0].copy()
 
         if self._event == 3:
-            align_steps = max(1, total // 4)
+            # 先完成 XY 對準，之後才開始 Z 下降。
+            align_fraction = float(np.clip(self.placement_xy_align_fraction, 0.1, 0.9))
+            align_steps = max(1, min(total - 1, int(round(total * align_fraction))))
+
             if step + 1 <= align_steps:
                 s_xy = self._smoothstep(step + 1, align_steps)
                 cmd_position = self._phase_start_position.copy()
@@ -406,9 +411,9 @@ class FrankaPickPlace:
         elif self._event == 1:
             total = max(3, int(self.events_dt[1]))
             descent_steps = max(total // 3, self.grasp_descent_steps)
-            settle_min_steps = max(self._scale_steps(8), total // 8)
+            settle_min_steps = max(self._scale_steps(15), total // 4)
             settle_max_steps = max(settle_min_steps, self.grasp_settle_timeout_steps)
-            close_steps = max(self._scale_steps(12), self.grasp_close_steps)
+            close_steps = max(self._scale_steps(16), self.grasp_close_steps)
             lift_steps = max(1, self.grasp_lift_steps)
 
             # ── 在 Phase 1 第 0 步：一次性鎖定安全起點與計算各段目標 ──────
@@ -533,8 +538,8 @@ class FrankaPickPlace:
         #   後 3/4 步：S 曲線從釋放位置平滑退避至安全高度
         # ──────────────────────────────────────────────────────────────────────
         elif self._event == 4:
-            total    = max(self._scale_steps(4), int(self.events_dt[4]))
-            open_seg = max(self._scale_steps(2), total // 4)   # 前 1/4 步用於開爪靜置
+            total    = max(self._scale_steps(4), int(self.events_dt[4] * 0.75)) # 縮短 Phase 4 總時長
+            open_seg = max(self._scale_steps(2), total // 6)   # 前 1/8 步用於開爪靜置
 
             if self._step == 0:
                 _, curr_pos, _ = self.robot.get_current_state()
@@ -585,7 +590,7 @@ class FrankaPickPlace:
     # ──────────────────────────────────────────────────────────────────────────
 
     def is_done(self) -> bool:
-        """回傳 True 表示所有 5 個 Phase 均已完成。"""
+        """回傳是否已完成全部五個 Phase，或控制器已標記失敗。"""
         return self._event >= len(self.events_dt) or self._motion_failed
 
     def reset(
@@ -593,12 +598,12 @@ class FrankaPickPlace:
         cube_position: np.ndarray | None = None,
         cube_orientation: np.ndarray | None = None,
     ) -> None:
-        """重置機器人與方塊位姿至初始狀態。"""
+        """重置機械臂與方塊位姿。"""
         self.reset_robot()
         self.reset_cube(position=cube_position, orientation=cube_orientation)
 
     def reset_robot(self) -> None:
-        """將手臂重置至預設關節姿態，並清空狀態機所有計步。"""
+        """重置機械臂與 FSM 狀態。"""
         if self.robot is not None:
             self.robot.reset_to_default_pose()
 
@@ -610,8 +615,6 @@ class FrankaPickPlace:
         self.target_position = None
         self._phase_errors = []
         self._phase_start_time = None
-
-        # 重要：FSM 內部狀態要先初始化，否則在 Phase 1 / 4 直接讀取時會炸
         self._grasp_close_start_step = None
         self._v_bottom_pos = np.zeros(3, dtype=np.float32)
         self._lift_target_position = np.zeros(3, dtype=np.float32)
@@ -623,7 +626,7 @@ class FrankaPickPlace:
         position: np.ndarray | None = None,
         orientation: np.ndarray | None = None,
     ) -> None:
-        """將方塊重置至指定位置（預設為初始位置）。"""
+        """將方塊重置至指定位置；未指定時使用初始位姿。"""
         if self.cube is not None:
             pos = position if position is not None else self.cube_initial_position
             ori = orientation if orientation is not None else self.cube_initial_orientation

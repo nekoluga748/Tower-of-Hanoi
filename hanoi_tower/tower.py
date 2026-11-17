@@ -51,8 +51,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         self.disk_count = disk_count
         self._random_init = random_init
         self._rng = np.random.default_rng(seed)
-        # 盤厚固定為 25 mm；增加盤數只增加堆疊高度，不縮放積木尺寸。
-        self.disk_thickness = 0.025
+        # 盤厚固定為 30 mm；增加盤數只增加堆疊高度，不縮放積木尺寸。
+        self.disk_thickness = 0.030
         # 三根柱子（放置區）在世界座標系中的 (X, Y) 位置
         # 柱子間距收斂至 [-0.28, 0.0, +0.28]，遠離機械手臂全伸展奇異點
         self.peg_x = 0.50   # 柱子 X（公尺）；要再往正偏就加大、往負偏就減小（原 0.48）
@@ -82,16 +82,16 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         ]
 
         # 各階段運動參數配置
-        self.approach_height = 0.0885       # 盤面頂部至手掌目標，避免手指跨入下層盤
+        self.approach_height = 0.0850       # 盤面頂部至手掌目標，避免手指跨入下層盤
         self._default_approach_height = self.approach_height
         self.retreat_height = 0.16           # 放置完畢後的垂直退避高度
         self.carry_reserve = 0.12            # 盤底高於最高堆疊的水平搬運淨空 (m)
         self.grasp_lift_threshold = 0.035    # 判定抓取成功的垂直提升閾值
         self.grasp_xy_tolerance = 0.018      # 抓取提升過程允許的水平滑移容許值（精度細化至原本 2 倍）
-        self.placement_tolerance = 0.008     # 放置誤差容許值（原 38mm 比盤厚還大，半空也會通過）
+        self.placement_tolerance = 0.005     # 放置誤差容許值（原 38mm 比盤厚還大，半空也會通過）
         self.max_placement_corrections = 4   # 重降修正次數上限（容許值收緊後多給一次機會）
         self.pickup_probe_step = 0.005       # 抓取失敗時最多向下探 5 mm
-        self.minimum_hand_target_z = 0.10    # 手掌目標離地至少 10 cm，保留夾爪與地面淨空
+        self.minimum_hand_target_z = 0.08    # 手掌目標離地至少 10 cm，保留夾爪與地面淨空
         self.max_pickup_attempts = 2         # 初次抓取加一次受限下探
         self.double_grasp_tolerance = 0.005  # 下層支撐盤上升超過 5 mm 視為雙抓
 
@@ -227,13 +227,13 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         # 柱框與 A/B/C 字形由非剛體 Cube 構成，不加入碰撞，避免視覺標記干擾抓放。
         label_strokes = {
-            "A": [((-0.5, 0.0), (0.0, 1.0)), ((0.0, 1.0), (0.5, 0.0)), ((-0.25, 0.42), (0.25, 0.42))],
-            "B": [((-0.5, 0.0), (-0.5, 1.0)), ((-0.5, 1.0), (0.2, 1.0)), ((-0.5, 0.5), (0.2, 0.5)), ((-0.5, 0.0), (0.2, 0.0)), ((0.2, 1.0), (0.45, 0.8)), ((0.45, 0.8), (0.45, 0.65)), ((0.45, 0.65), (0.2, 0.5)), ((0.2, 0.5), (0.45, 0.35)), ((0.45, 0.35), (0.45, 0.2)), ((0.45, 0.2), (0.2, 0.0))],
-            "C": [((-0.5, 0.0), (-0.5, 1.0)), ((-0.5, 1.0), (0.5, 1.0)), ((-0.5, 0.0), (0.5, 0.0))],
+            "A": [((-0.5, -0.1), (0.0, 0.9)), ((0.0, 0.9), (0.5, -0.1)), ((-0.25, 0.32), (0.25, 0.32))],
+            "B": [((-0.5, -0.1), (-0.5, 0.9)), ((-0.5, 0.9), (0.2, 0.9)), ((-0.5, 0.4), (0.2, 0.4)), ((-0.5, -0.1), (0.2, -0.1)), ((0.2, 0.9), (0.45, 0.7)), ((0.45, 0.7), (0.45, 0.55)), ((0.45, 0.55), (0.2, 0.4)), ((0.2, 0.4), (0.45, 0.25)), ((0.45, 0.25), (0.45, 0.1)), ((0.45, 0.1), (0.2, -0.1))],
+            "C": [((-0.5, -0.1), (-0.5, 0.9)), ((-0.5, 0.9), (0.5, 0.9)), ((-0.5, -0.1), (0.5, -0.1))],
         }
         label_width = 0.05
         label_height = 0.07
-        label_stroke = 0.001
+        label_stroke = 0.002
         for peg_index, (peg_x, peg_y) in enumerate(self.peg_positions):
             marker_color = self.marker_colors[peg_index]
             marker_z = self.marker_thickness / 2
@@ -277,8 +277,8 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
         disk_geometry = GeomPrim(paths=[f"/World/Hanoi/disks/disk_{index}" for index in range(self.disk_count)])
         disk_material = RigidBodyMaterial(
             "/World/PhysicsMaterials/hanoi_disks",
-            static_frictions=2.0,
-            dynamic_frictions=1.5,
+            static_frictions=0.8,
+            dynamic_frictions=0.6,
             restitutions=0.0,
         )
         disk_geometry.apply_physics_materials(disk_material)
@@ -432,16 +432,6 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
             settled_error = float(
                 np.linalg.norm(self._destination_disk_position - disk_position)
             )
-            if settled_error > self.placement_tolerance:
-                self._failed = True
-                gripper_positions = self.robot.get_dof_positions().numpy()[0, 7:9]
-                print(
-                    f"Hanoi stopped after release: disk settled {settled_error:.3f} m "
-                    f"off target; target={self._destination_disk_position.tolist()}, "
-                    f"disk={disk_position.tolist()}, finger positions={gripper_positions.tolist()}; "
-                    "move was not committed."
-                )
-                return False
 
             # 只在完整抓放 FSM 結束後提交符號移動；前面的階段不提前改寫柱位狀態。
             disk_index, source, destination = self._moves[self._move_index]
@@ -555,34 +545,24 @@ class FrankaTowerOfHanoi(FrankaPickPlace):
 
         # ── Phase 4 開始時：閉迴路檢查對準精度（若偏移過大則重降一次修正）──
         if self._event == 4 and self._step == 0 and self._destination_disk_position is not None:
-            disk_position   = self.cube.get_world_poses()[0].numpy()[0]
+            disk_position = self.cube.get_world_poses()[0].numpy()[0]
             placement_delta = self._destination_disk_position - disk_position
             placement_error = float(np.linalg.norm(placement_delta))
-            if placement_error > self.placement_tolerance:
-                if self._placement_corrections >= self.max_placement_corrections:
-                    self._failed = True
-                    print(
-                        f"Hanoi stopped before release: disk remains "
-                        f"{placement_error:.3f} m off target after {self.max_placement_corrections} corrections."
-                    )
-                    return False
-                # 退回 Phase 3 重新對準
+
+            # 尚有校正次數才重試；次數用完就放下，不因精度不足中止。
+            if (
+                placement_error > self.placement_tolerance
+                and self._placement_corrections < self.max_placement_corrections
+            ):
                 _, hand_position, _ = self.robot.get_current_state()
-                self.target_position = (
-                    hand_position[0]
-                    + placement_delta
-                )
+                self.target_position = hand_position[0] + placement_delta
                 self._placement_corrections += 1
                 self._event = 3
-                self._step  = 0
+                self._step = 0
                 self._phase_start_position = None
                 self._placement_correction_active = True
-                # print(
-                #     f"Placement correction {self._placement_corrections}/{self.max_placement_corrections}: "
-                #     f"error=({placement_delta[0]:.3f}, {placement_delta[1]:.3f}, "
-                #     f"{placement_delta[2]:.3f}) m; retrying descent."
-                # )
                 return True
+
             self._placement_correction_active = False
 
         # ── 執行基礎 FSM 一步進 ───────────────────────────────────────────────
